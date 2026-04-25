@@ -1,0 +1,28 @@
+# 每种资源类型参与哈希计算的字段定义
+# 排除 id、name、metadata（外观数据）、tool（来源特定覆盖）
+# 只有核心业务字段参与哈希，确保"本质相同"的资源有相同的 hash8
+# 所有资源类型的核心字段都在 [config] 子表下
+
+[provider]
+fields = ["config"]
+
+[mcp]
+fields = ["config"]
+
+[hook]
+fields = ["config"]
+
+[env]
+fields = ["config"]
+
+[prompt]
+fields = ["config"]
+
+[skill]
+fields = ["config"]
+
+[agent]
+fields = ["config"]
+
+[plugin]
+fields = ["config"]

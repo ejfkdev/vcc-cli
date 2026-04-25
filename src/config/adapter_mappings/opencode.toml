@@ -1,0 +1,144 @@
+[tool]
+name = "opencode"
+config_dir = "~/.config/opencode"
+settings_path = "opencode.json"
+
+[mcp]
+format = "json"
+path = "opencode.json"
+servers_key = "mcp"
+command_format = "array"
+env_field = "environment"
+# OpenCode uses "enabled" (true=on, false=off) instead of "disabled" (true=off)
+enabled_key = "enabled"
+# OpenCode 配置文件支持 JSONC 格式（注释和尾逗号）
+jsonc = true
+# 当 opencode.json 不存在时，按顺序尝试这些备选文件
+fallback_paths = ["opencode.jsonc", "config.json"]
+
+[mcp.type_map]
+stdio = "local"
+sse = "remote"
+streamable-http = "remote"
+
+[mcp.default_fields]
+enabled = true
+
+[mcp.known_keys]
+# 键名必须使用 VCC 类型名（extract_extra 用 VCC 类型查找）
+stdio = ["type", "command", "environment", "enabled", "timeout"]
+sse = ["type", "url", "headers", "enabled", "oauth", "timeout"]
+streamable-http = ["type", "url", "headers", "enabled", "oauth", "timeout"]
+
+[provider]
+format = "json_provider_table"
+path = "opencode.json"
+providers_key = "provider"
+
+# DocEngine 声明式字段映射
+[provider.field_map]
+entries_path = "provider"
+type_fields = ["provider"]
+model_field = "model"
+
+[provider.field_map.fields.api_key]
+path = "options.apiKey"
+read_strategy = "env_resolve"
+
+[provider.field_map.fields.base_url]
+path = "options.baseURL"
+fallback = ["api"]
+write_to = ["options.baseURL", "api"]
+
+[provider.field_map.fields.npm]
+path = "npm"
+
+[provider.field_map.fields.default_model]
+path = "model"
+scope = "document"
+read_strategy = "split_slash_last"
+write_strategy = "combine_slash"
+write_to = ["model"]
+
+[provider.field_map.fields.models]
+path = "models"
+read_strategy = "object_keys"
+
+[provider.field_map.fields.headers]
+path = "options.headers"
+
+[provider.field_map.fields.env_key_names]
+path = "env"
+
+[provider.field_map.inject_on_write]
+"$schema" = "https://opencode.ai/config.json"
+
+[[provider.type_map]]
+vcc = "anthropic"
+tool = "anthropic"
+
+[[provider.type_map]]
+vcc = "openai"
+tool = "openai"
+
+[[provider.type_map]]
+vcc = "openai-responses"
+tool = "openai"
+
+[[provider.type_map]]
+vcc = "gemini"
+tool = "google"
+
+[[provider.type_map]]
+vcc = "vertexai"
+tool = "google-vertex"
+
+[[provider.type_map]]
+vcc = "bedrock"
+tool = "bedrock"
+
+[[provider.type_map]]
+vcc = "generic"
+tool = "custom"
+
+[capabilities]
+defaults = ["provider"]
+skill_mode = "cache_only"
+
+[prompt]
+path = "AGENTS.md"
+sync_name = "opencode-system"
+
+[session]
+format = "opencode_json"
+path = "storage/session"
+glob = "*.json"
+resume_command = "opencode session resume {id}"
+
+[plugin]
+format = "json_array"
+path = "opencode.json"
+plugins_key = "plugin"
+section_key = "plugin"
+
+# ══════════════════════════════════════════════════════════
+# NPM 包名 → VCC provider 类型映射
+# ══════════════════════════════════════════════════════════
+
+[provider.npm_type_map]
+"@ai-sdk/anthropic" = "anthropic"
+"@ai-sdk/openai" = "openai"
+"@ai-sdk/google" = "gemini"
+"@ai-sdk/google-vertex" = "vertexai"
+"@ai-sdk/amazon-bedrock" = "bedrock"
+"@ai-sdk/azure" = "azure"
+"@ai-sdk/xai" = "xai"
+"@ai-sdk/mistral" = "mistral"
+"@ai-sdk/groq" = "groq"
+"@ai-sdk/deepinfra" = "deepinfra"
+"@ai-sdk/cerebras" = "cerebras"
+"@ai-sdk/cohere" = "cohere"
+"@ai-sdk/togetherai" = "togetherai"
+"@ai-sdk/perplexity" = "perplexity"
+"@ai-sdk/alibaba" = "alibaba"
+"@openrouter/ai-sdk-provider" = "openrouter"

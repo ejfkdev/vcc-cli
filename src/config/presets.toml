@@ -1,0 +1,39 @@
+# 预设定义：MCP Server 的快速配置模板
+# 编译时通过 include_str!() 嵌入程序
+# Provider 预设已迁移到 models.dev 动态数据，见 src/config/models.rs
+
+[[mcp]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@anthropic/mcp-filesystem"]
+description = "文件系统 MCP Server"
+
+[[mcp]]
+name = "github"
+command = "npx"
+args = ["-y", "@anthropic/mcp-github"]
+description = "GitHub MCP Server"
+
+[[mcp]]
+name = "memory"
+command = "npx"
+args = ["-y", "@anthropic/mcp-memory"]
+description = "Memory MCP Server"
+
+[[mcp]]
+name = "fetch"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-fetch"]
+description = "HTTP Fetch MCP Server"
+
+[[mcp]]
+name = "time"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-time"]
+description = "时间工具 MCP Server"
+
+[[mcp]]
+name = "sequential-thinking"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+description = "顺序推理 MCP Server"

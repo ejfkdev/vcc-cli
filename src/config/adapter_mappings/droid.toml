@@ -1,0 +1,65 @@
+[tool]
+name = "droid"
+config_dir = "~/.factory"
+
+[mcp]
+format = "json"
+path = "mcp.json"
+servers_key = "mcpServers"
+disabled_key = "disabled"
+
+[mcp.type_map]
+stdio = "stdio"
+sse = "http"
+streamable-http = "http"
+
+[mcp.field_map]
+disabled_tools = "disabledTools"
+
+[mcp.known_keys]
+stdio = ["type", "command", "args", "env", "disabledTools"]
+http = ["type", "url", "headers", "disabledTools"]
+
+[provider]
+format = "json_custom_models"
+path = "settings.json"
+models_key = "customModels"
+custom_model_known_keys = ["model", "displayName", "baseUrl", "apiKey", "provider", "maxOutputTokens", "extraHeaders"]
+
+[[provider.type_map]]
+vcc = "anthropic"
+tool = "anthropic"
+
+[[provider.type_map]]
+vcc = "openai"
+tool = "openai"
+
+[[provider.type_map]]
+vcc = "generic"
+tool = "generic-chat-completion-api"
+
+[provider.custom_model_fields]
+model_id = "model"
+name = "displayName"
+base_url = "baseUrl"
+api_key = "apiKey"
+api_provider = "provider"
+max_tokens = "maxOutputTokens"
+headers = "extraHeaders"
+
+[capabilities]
+defaults = ["provider"]
+skill_mode = "cache_only"
+
+[prompt]
+path = "AGENTS.md"
+sync_name = "droid-system"
+
+[plugin]
+format = "enabled_map"
+path = "settings.json"
+plugins_key = "enabledPlugins"
+manifest_dir = ".factory-plugin"
+manifest_file = "plugin.json"
+install_dir = "plugins/cache"
+marketplace_key = "extraKnownMarketplaces"

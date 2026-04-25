@@ -1,0 +1,41 @@
+[tool]
+name = "aider"
+# Aider 配置文件直接在 home 目录
+config_dir = "~/"
+
+[mcp]
+# Aider 不支持 MCP
+format = ""
+
+[provider]
+format = "yaml_flat"
+path = ".aider.conf.yml"
+
+# Aider YAML 配置只支持 openai-api-key 和 anthropic-api-key 两个专用字段。
+# 其他 provider（deepseek/openrouter/gemini/groq 等）需要通过环境变量设置，
+# 使用 AIDER_ 前缀（如 AIDER_OPENAI_API_KEY）或 .env 文件。
+
+[[provider.env_mapping]]
+vcc_type = "anthropic"
+api_key = "anthropic-api-key"
+base_url = ""
+model = ""
+
+[[provider.env_mapping]]
+vcc_type = "openai"
+api_key = "openai-api-key"
+base_url = "openai-api-base"
+model = ""
+
+[[provider.env_mapping]]
+vcc_type = "openai-responses"
+api_key = "openai-api-key"
+base_url = "openai-api-base"
+model = ""
+
+[capabilities]
+# Aider 只支持 provider 配置，无 MCP/hooks/agents/skills/plugins
+defaults = ["provider"]
+skill_mode = "disabled"
+hook_enabled = false
+env_enabled = false

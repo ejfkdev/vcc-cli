@@ -1,0 +1,80 @@
+[tool]
+name = "gemini"
+config_dir = "~/.gemini"
+
+[mcp]
+format = "json"
+path = "settings.json"
+servers_key = "mcpServers"
+disabled_key = "disabled"
+
+# Gemini: streamable-http 用 httpUrl 而非 url
+[mcp.type_field_map.streamable-http]
+url = "httpUrl"
+
+# Gemini: disabled_tools → excludeTools
+[mcp.field_map]
+disabled_tools = "excludeTools"
+
+# Gemini: tool.<name>.extra 中的字段映射到工具 JSON 键名
+[mcp.extra_field_map]
+include_tools = "includeTools"
+timeout = "timeout"
+trust = "trust"
+description = "description"
+cwd = "cwd"
+
+[mcp.known_keys]
+stdio = ["command", "args", "env", "cwd", "timeout", "trust", "description", "includeTools", "excludeTools"]
+sse = ["url", "timeout", "trust", "description", "includeTools", "excludeTools"]
+streamable-http = ["httpUrl", "headers", "timeout", "trust", "description", "includeTools", "excludeTools"]
+
+[provider]
+format = "env_file"
+path = ".env"
+sync_name = "gemini-google"
+sync_type = "google"
+
+# Gemini API Key 认证
+[[provider.env_mapping]]
+vcc_type = "google"
+api_key = "GEMINI_API_KEY"
+base_url = "GOOGLE_GEMINI_BASE_URL"
+
+# Vertex AI 认证
+[[provider.env_mapping]]
+vcc_type = "vertex-ai"
+api_key = "GOOGLE_API_KEY"
+base_url = ""
+
+[capabilities]
+defaults = ["provider", "mcp", "hook"]
+skill_mode = "full"
+hook_enabled = true
+env_enabled = true
+
+[env]
+section_key = "env"
+path = "settings.json"
+
+[hook]
+section_key = "hooks"
+# Gemini CLI hooks: 与 Claude 格式相同（settings.json 中的 hooks 键）
+# 事件名称参考: packages/cli/src/config/settingsSchema.ts
+events = ["BeforeTool", "AfterTool", "BeforeAgent", "AfterAgent", "Notification", "SessionStart", "SessionEnd", "PreCompress", "BeforeModel", "AfterModel", "BeforeToolSelection"]
+
+[prompt]
+path = "GEMINI.md"
+sync_name = "gemini-system"
+
+[session]
+format = "json"
+path = "tmp"
+glob = "session-*.json"
+resume_command = "gemini --resume {id}"
+
+[plugin]
+format = "directory"
+install_dir = "extensions"
+manifest_file = "gemini-extension.json"
+enablement_path = "extension-enablement.json"

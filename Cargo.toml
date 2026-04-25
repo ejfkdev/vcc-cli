@@ -1,0 +1,51 @@
+[package]
+name = "vcc"
+version = "0.1.0"
+edition = "2021"
+description = "Unified configuration manager for AI coding tools"
+license = "MIT"
+repository = "https://github.com/ejfkdev/vcc-cli"
+homepage = "https://github.com/ejfkdev/vcc-cli"
+readme = "README.md"
+keywords = ["cli", "ai", "config", "mcp", "claude"]
+categories = ["command-line-utilities"]
+rust-version = "1.75"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "string"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+dirs = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rusty-leveldb = "1.0"
+regex = "1"
+twox-hash = { version = "2", features = ["xxhash3_64"] }
+md-5 = "0.10"
+nanoid = "0.4"
+chrono = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+sonic-rs = "0.5.8"
+rayon = "1.10.0"
+memmap2 = "0.9"
+memchr = "2"
+libc = "0.2"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = "s"
+codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "fat"
+strip = true
+opt-level = "z"
+codegen-units = 1

@@ -1,0 +1,97 @@
+[tool]
+name = "claude"
+config_dir = "~/.claude"
+settings_path = "settings.json"
+
+[mcp]
+format = "json"
+path = "settings.json"
+servers_key = "mcpServers"
+disabled_key = "disabled"
+# Claude 的 MCP 格式最简单，不需要 type_map 和 field_map
+
+[mcp.known_keys]
+stdio = ["command", "args", "env", "url"]
+
+[provider]
+format = "env_vars"
+path = "settings.json"
+env_key = "env"
+
+[[provider.env_mapping]]
+vcc_type = "anthropic"
+api_key = "ANTHROPIC_AUTH_TOKEN"
+base_url = "ANTHROPIC_BASE_URL"
+model = "ANTHROPIC_MODEL"
+
+[[provider.env_mapping]]
+vcc_type = "anthropic"
+api_key = "ANTHROPIC_API_KEY"
+base_url = "ANTHROPIC_BASE_URL"
+model = "ANTHROPIC_MODEL"
+
+[[provider.env_mapping]]
+vcc_type = "openai"
+api_key = "OPENAI_API_KEY"
+base_url = "OPENAI_BASE_URL"
+model = ""
+
+[[provider.env_mapping]]
+vcc_type = "google"
+api_key = "GEMINI_API_KEY"
+base_url = "GOOGLE_GEMINI_BASE_URL"
+model = ""
+
+[[provider.model_env]]
+role = "sonnet"
+env_var = "ANTHROPIC_DEFAULT_SONNET_MODEL"
+
+[[provider.model_env]]
+role = "opus"
+env_var = "ANTHROPIC_DEFAULT_OPUS_MODEL"
+
+[[provider.model_env]]
+role = "haiku"
+env_var = "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+
+[[provider.model_env]]
+role = "reasoning"
+env_var = "ANTHROPIC_REASONING_MODEL"
+
+[capabilities]
+defaults = ["provider", "env", "mcp"]
+skill_mode = "full"
+hook_enabled = true
+env_enabled = true
+model_format = "env_var"
+
+[hook]
+events = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop", "StopFailure", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "Notification"]
+section_key = "hooks"
+
+[env]
+exclude_keys = ["API_KEY", "API_BASE_URL", "MODEL"]
+section_key = "env"
+path = "settings.json"
+
+[prompt]
+path = "CLAUDE.md"
+sync_name = "claude-system"
+
+[session]
+format = "jsonl"
+path = "projects"
+glob = "*.jsonl"
+resume_command = "claude --resume {id}"
+
+[agent]
+path = "agents"
+
+[plugin]
+format = "enabled_map"
+path = "settings.json"
+plugins_key = "enabledPlugins"
+manifest_dir = ".claude-plugin"
+manifest_file = "plugin.json"
+install_dir = "plugins/cache"
+marketplace_key = "extraKnownMarketplaces"

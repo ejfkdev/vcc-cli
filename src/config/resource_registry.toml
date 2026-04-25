@@ -1,0 +1,519 @@
+# 资源注册表：定义所有资源类型的元信息
+# 编译时通过 include_str!() 嵌入程序
+
+[id_generation]
+alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz"
+length = 8
+
+# ══════════════════════════════════════════════════════════
+# Provider
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "provider"
+dir = "providers"
+init_subdir = "registry/providers"
+extra_subcommands = []
+examples = [
+    "  vcc provider add myapi -p anthropic -k sk-xxx          # 使用预设添加",
+    "  vcc provider add ollama -t openai -u http://localhost:11434/v1  # 自定义 provider",
+    "  vcc provider list                                       # 列出所有",
+    "  vcc provider show myapi                                 # 按名称查看",
+    "  vcc provider show myapi-a1b2c3d4                        # 按文件名(name-hash8)",
+    "  vcc provider show AbCdEfGh                              # 按唯一 ID",
+    "  vcc provider edit myapi -k sk-new-key                   # 修改 API key",
+]
+
+[[resources.cli_fields]]
+name = "preset"
+short = "p"
+help = "使用预设 (运行 'vcc preset provider' 查看所有可用平台)"
+field_type = "string"
+add_only = true
+preset_trigger = true
+
+[[resources.cli_fields]]
+name = "type"
+short = "t"
+help = "Provider 类型 (anthropic/openai/custom 等)，使用预设时自动填充"
+field_type = "string"
+preset_fill = true
+
+[[resources.cli_fields]]
+name = "key"
+short = "k"
+help = "API Key（如暂无可后续通过 edit 设置）"
+field_type = "string"
+sensitive = true
+
+[[resources.cli_fields]]
+name = "url"
+short = "u"
+help = "Base URL，使用预设时自动填充"
+field_type = "string"
+preset_fill = true
+
+[[resources.cli_fields]]
+name = "model"
+short = "m"
+help = "默认模型，使用预设时自动填充"
+field_type = "string"
+preset_fill = true
+
+[[resources.cli_fields]]
+name = "models"
+short = "M"
+help = "可用模型列表（逗号分隔）"
+field_type = "csv"
+
+[[resources.cli_fields]]
+name = "var"
+short = "v"
+help = "环境变量 (KEY=VALUE 格式，可多次指定)"
+field_type = "kvvec"
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+is_metadata = true
+
+# ══════════════════════════════════════════════════════════
+# MCP Server
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "mcp"
+dir = "mcp"
+init_subdir = "registry/mcp"
+valid_types = ["stdio", "sse", "streamable-http"]
+extra_subcommands = ["enable", "disable"]
+examples = [
+    "  vcc mcp add fs -p filesystem                            # 使用预设添加",
+    "  vcc mcp add myserver -c npx -a \"-y,my-mcp-server\"       # 自定义命令",
+    "  vcc mcp list                                            # 列出所有",
+    "  vcc mcp show fs                                         # 查看详情",
+    "  vcc mcp edit myserver -v API_KEY=xxx                    # 修改环境变量",
+]
+
+[[resources.cli_fields]]
+name = "preset"
+short = "p"
+help = "使用预设 (filesystem/github/memory/fetch/time/sequential-thinking)"
+field_type = "string"
+add_only = true
+preset_trigger = true
+
+[[resources.cli_fields]]
+name = "type"
+short = "t"
+help = "Server 类型 (stdio/sse/streamable-http)"
+field_type = "string"
+default_value = "stdio"
+possible_values = ["stdio", "sse", "streamable-http"]
+
+[[resources.cli_fields]]
+name = "command"
+short = "c"
+help = "命令 (stdio 类型)，使用预设时自动填充"
+field_type = "string"
+preset_fill = true
+
+[[resources.cli_fields]]
+name = "args"
+short = "a"
+help = "参数，逗号分隔，使用预设时自动填充"
+field_type = "csv"
+preset_fill = true
+
+[[resources.cli_fields]]
+name = "url"
+short = "u"
+help = "URL (sse/streamable-http 类型)"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "var"
+short = "v"
+help = "环境变量 (KEY=VALUE 格式，可多次指定)"
+field_type = "kvvec"
+sensitive = true
+
+[[resources.cli_fields]]
+name = "header"
+short = "H"
+help = "HTTP 请求头 (KEY=VALUE 格式，可多次指定，sse/streamable-http 类型)"
+field_type = "kvvec"
+
+[[resources.cli_fields]]
+name = "tool_set"
+short = "S"
+help = "工具特有配置 (TOOL:KEY=VALUE 格式，可多次指定)"
+field_type = "toolset"
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+
+# ══════════════════════════════════════════════════════════
+# Hook
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "hook"
+dir = "hooks"
+init_subdir = "registry/hooks"
+valid_events = [
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "SessionStart",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "Notification",
+    # Gemini CLI 事件
+    "BeforeTool",
+    "AfterTool",
+    "BeforeAgent",
+    "AfterAgent",
+    "PreCompress",
+    "BeforeModel",
+    "AfterModel",
+    "BeforeToolSelection",
+]
+extra_subcommands = []
+examples = [
+    "  vcc hook add myhook -e PreToolUse -c \"echo $TOOL_NAME\"  # 添加钩子",
+    "  vcc hook add check -e PreToolUse -c \"./check.sh\" -m Bash  # 带 matcher",
+    "  vcc hook list                                           # 列出所有",
+    "  vcc hook edit myhook -c \"echo new\"                      # 修改命令",
+]
+
+[[resources.cli_fields]]
+name = "event"
+short = "e"
+help = "钩子事件类型 (PreToolUse/PostToolUse/Stop 等)"
+field_type = "string"
+required_for_add = true
+possible_values = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop", "StopFailure", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "Notification", "BeforeTool", "AfterTool", "BeforeAgent", "AfterAgent", "PreCompress", "BeforeModel", "AfterModel", "BeforeToolSelection"]
+
+[[resources.cli_fields]]
+name = "command"
+short = "c"
+help = "要执行的 Shell 命令"
+field_type = "string"
+required_for_add = true
+
+[[resources.cli_fields]]
+name = "matcher"
+short = "m"
+help = "正则匹配器"
+field_type = "string"
+default_value = ""
+
+[[resources.cli_fields]]
+name = "timeout"
+short = "t"
+help = "超时秒数"
+field_type = "u64"
+default_value = "30"
+
+[[resources.cli_fields]]
+name = "tool_set"
+short = "S"
+help = "工具特有配置 (TOOL:KEY=VALUE 格式，可多次指定)"
+field_type = "toolset"
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+
+# ══════════════════════════════════════════════════════════
+# Agent
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "agent"
+dir = "agents"
+init_subdir = "registry/agents"
+valid_modes = ["primary", "subagent"]
+extra_subcommands = []
+examples = [
+    "  vcc agent add reviewer -m subagent --model sonnet -c \"Review code\"",
+    "  vcc agent add planner -f ./agent-instructions.md        # 从文件读取",
+    "  vcc agent list                                          # 列出所有",
+    "  vcc agent edit reviewer --model opus                    # 修改模型",
+]
+
+[[resources.cli_fields]]
+name = "mode"
+short = "m"
+help = "代理模式 (primary/subagent)"
+field_type = "string"
+default_value = "subagent"
+possible_values = ["primary", "subagent"]
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "代理功能描述"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "model"
+short = "M"
+help = "引用的 Model 名称"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "tools_enabled"
+short = "T"
+help = "启用的工具（逗号分隔）"
+field_type = "csv"
+
+[[resources.cli_fields]]
+name = "tools_disabled"
+short = "D"
+help = "禁用的工具（逗号分隔）"
+field_type = "csv"
+
+[[resources.cli_fields]]
+name = "temperature"
+short = "t"
+help = "温度参数"
+field_type = "f64"
+
+[[resources.cli_fields]]
+name = "content"
+short = "c"
+help = "Agent 指令内容"
+field_type = "content"
+
+[[resources.cli_fields]]
+name = "file"
+short = "f"
+help = "从文件读取指令内容"
+field_type = "file"
+
+# ══════════════════════════════════════════════════════════
+# Skill
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "skill"
+dir = "skills"
+init_subdir = "registry/skills"
+valid_sources = ["github", "local", "url"]
+valid_install_methods = ["symlink", "copy"]
+extra_subcommands = ["install"]
+examples = [
+    "  vcc skill add my-skill -r owner/repo                    # GitHub 仓库",
+    "  vcc skill list                                          # 列出所有",
+    "  vcc skill show my-skill                                 # 查看详情",
+    "  vcc skill edit my-skill -r new-owner/repo               # 修改仓库",
+]
+
+[[resources.cli_fields]]
+name = "source"
+short = "s"
+help = "来源 (github/local/url)"
+field_type = "string"
+default_value = "github"
+possible_values = ["github", "local", "url"]
+
+[[resources.cli_fields]]
+name = "repo"
+short = "r"
+help = "GitHub 仓库 (owner/repo)"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "path"
+short = "p"
+help = "路径或 URL"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "install_method"
+short = "i"
+help = "安装方式 (symlink/copy)"
+field_type = "string"
+default_value = "symlink"
+possible_values = ["symlink", "copy"]
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+is_metadata = true
+
+# ══════════════════════════════════════════════════════════
+# Prompt
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "prompt"
+dir = "prompts"
+init_subdir = "registry/prompts"
+extra_subcommands = []
+examples = [
+    "  vcc prompt add myrules -c \"Always use TypeScript\"       # 内联内容",
+    "  vcc prompt add rules -f ./rules.md                      # 从文件读取",
+    "  vcc prompt list                                         # 列出所有",
+    "  vcc prompt edit myrules -c \"Updated rules\"              # 修改内容",
+]
+
+[[resources.cli_fields]]
+name = "content"
+short = "c"
+help = "Prompt 内容"
+field_type = "content"
+
+[[resources.cli_fields]]
+name = "file"
+short = "f"
+help = "从文件读取内容"
+field_type = "file"
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+is_metadata = true
+
+# ══════════════════════════════════════════════════════════
+# Env
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "env"
+dir = "envs"
+init_subdir = "registry/envs"
+extra_subcommands = []
+examples = [
+    "  vcc env add staging -v API_URL=https://staging.example.com -v DEBUG=true",
+    "  vcc env list                                            # 列出所有",
+    "  vcc env edit staging -v NEW_VAR=value                   # 添加变量",
+    "  vcc env edit staging --remove-var OBSOLETE_KEY          # 删除变量",
+]
+
+[[resources.cli_fields]]
+name = "var"
+short = "v"
+help = "环境变量 (KEY=VALUE 格式，可多次指定)"
+field_type = "kvvec"
+
+[[resources.cli_fields]]
+name = "remove_var"
+short = "R"
+help = "要删除的变量名（逗号分隔）"
+field_type = "csv"
+edit_only = true
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+is_metadata = true
+
+# ══════════════════════════════════════════════════════════
+# Plugin
+# ══════════════════════════════════════════════════════════
+
+[[resources]]
+kind = "plugin"
+dir = "plugins"
+init_subdir = "registry/plugins"
+valid_sources = ["github", "local", "marketplace", "url", "unknown"]
+valid_install_methods = ["symlink", "copy"]
+valid_formats = ["claude", "codex", "droid", "gemini", "kimi", "opencode", "universal"]
+extra_subcommands = ["enable", "disable", "install"]
+examples = [
+    "  vcc plugin add my-plugin -r owner/repo -f claude        # GitHub 仓库，claude 格式",
+    "  vcc plugin list                                         # 列出所有",
+    "  vcc plugin show my-plugin                               # 查看详情",
+    "  vcc plugin edit my-plugin -f codex                      # 修改格式",
+]
+
+[[resources.cli_fields]]
+name = "source"
+short = "s"
+help = "来源 (github/local/marketplace/url)"
+field_type = "string"
+default_value = "github"
+possible_values = ["github", "local", "marketplace", "url"]
+
+[[resources.cli_fields]]
+name = "repo"
+short = "r"
+help = "GitHub 仓库 (owner/repo)"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "path"
+short = "p"
+help = "路径或 URL"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "marketplace"
+short = "M"
+help = "Marketplace 名称"
+field_type = "string"
+
+[[resources.cli_fields]]
+name = "format"
+short = "f"
+help = "原始格式 (claude/codex/droid/gemini/kimi/opencode/universal)"
+field_type = "string"
+possible_values = ["claude", "codex", "droid", "gemini", "kimi", "opencode", "universal"]
+
+[[resources.cli_fields]]
+name = "install_method"
+short = "i"
+help = "安装方式 (symlink/copy)"
+field_type = "string"
+default_value = "symlink"
+possible_values = ["symlink", "copy"]
+
+[[resources.cli_fields]]
+name = "description"
+short = "d"
+help = "描述"
+field_type = "string"
+is_metadata = true
+
+# ══════════════════════════════════════════════════════════
+# Init
+# ══════════════════════════════════════════════════════════
+
+[init]
+extra_dirs = ["profiles"]
+
+# ══════════════════════════════════════════════════════════
+# 适配器工具名称列表
+# ══════════════════════════════════════════════════════════
+
+[tools]
+adapters = ["claude", "codex", "gemini", "opencode", "droid", "kimi", "aider"]
+
+# ══════════════════════════════════════════════════════════
+# 数据源名称列表
+# ══════════════════════════════════════════════════════════
+
+[datasources]
+names = ["cc-switch", "cherry-studio"]

@@ -1,0 +1,127 @@
+[tool]
+name = "kimi"
+config_dir = "~/.kimi"
+
+[mcp]
+format = "json"
+path = "mcp.json"
+servers_key = "mcpServers"
+disabled_key = "disabled"
+skip_type_for = ["stdio"]
+
+[mcp.type_map]
+stdio = "stdio"
+sse = "sse"
+streamable-http = "http"
+
+[mcp.field_map]
+type = "transport"
+
+# Kimi uses "custom_headers" instead of "headers" for SSE/HTTP servers
+[mcp.type_field_map.sse]
+headers = "custom_headers"
+
+[mcp.type_field_map.http]
+headers = "custom_headers"
+
+[provider]
+format = "toml_provider_table"
+path = "config.toml"
+providers_key = "providers"
+
+# DocEngine 声明式字段映射
+[provider.field_map]
+entries_path = "providers"
+type_fields = ["type"]
+model_field = "../model"
+
+[provider.field_map.fields.type]
+path = "type"
+
+[provider.field_map.fields.api_key]
+path = "api_key"
+
+[provider.field_map.fields.base_url]
+path = "base_url"
+
+[provider.field_map.fields.headers]
+path = "custom_headers"
+
+[provider.field_map.fields.default_model]
+path = "default_model"
+scope = "document"
+
+[[provider.type_map]]
+vcc = "anthropic"
+tool = "anthropic"
+
+[[provider.type_map]]
+vcc = "openai"
+tool = "openai_legacy"
+
+[[provider.type_map]]
+vcc = "openai-responses"
+tool = "openai_responses"
+
+[[provider.type_map]]
+vcc = "gemini"
+tool = "gemini"
+
+[[provider.type_map]]
+vcc = "vertexai"
+tool = "vertexai"
+
+[[provider.type_map]]
+vcc = "kimi"
+tool = "kimi"
+
+[[provider.type_map]]
+vcc = "generic"
+tool = "openai_legacy"
+
+[[provider.type_map]]
+vcc = "custom"
+tool = "openai_legacy"
+
+[capabilities]
+defaults = ["provider"]
+skill_mode = "cache_only"
+hook_enabled = true
+
+[hook]
+format = "toml_hooks"
+path = "config.toml"
+section_key = "hooks"
+events = [
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "SessionStart",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "Notification",
+]
+
+[prompt]
+path = "AGENTS.md"
+sync_name = "kimi-system"
+
+[plugin]
+format = "directory"
+install_dir = "plugins"
+manifest_file = "plugin.json"
+
+[agent]
+path = "agents"
+format = "kimi_yaml"
+
+[session]
+format = "kimi_dir"
+path = "sessions"
+resume_command = "kimi -r {id}"

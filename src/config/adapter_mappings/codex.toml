@@ -1,0 +1,60 @@
+[tool]
+name = "codex"
+config_dir = "~/.codex"
+
+[mcp]
+format = "toml"
+path = "config.toml"
+servers_key = "mcp_servers"
+disabled_key = "disabled"
+headers_field = "http_headers"
+# 只列出 mcp_from_toml() 中显式映射到 McpConfig 的字段
+# 未列出的字段（如 env_vars, cwd, enabled, required, bearer_token_env_var 等）
+# 会保留在 McpConfig.extra 中，apply 时通过 extra 还原，避免数据丢失
+toml_known_keys = [
+    "command", "args",              # stdio → McpConfig
+    "url", "http_headers",          # streamable-http → McpConfig (headers 映射为 http_headers)
+    "env",                          # stdio & streamable-http → McpConfig.env
+    "disabled_tools",               # → McpConfig.disabled_tools
+]
+
+[provider]
+format = "codex_split"
+auth_path = "auth.json"
+config_path = "config.toml"
+api_key_key = "OPENAI_API_KEY"
+
+# Codex config.toml 中 custom provider 的默认字段
+[provider.defaults]
+model_provider = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+model_reasoning_effort = "high"
+
+[capabilities]
+defaults = ["provider"]
+skill_mode = "cache_only"
+# Codex 支持 hooks（hooks.json 格式），但格式与 VCC 模型不同
+# （Codex 使用嵌套的 MatcherGroup 结构），需要单独的适配器
+hook_enabled = false
+
+[prompt]
+path = "AGENTS.md"
+sync_name = "codex-system"
+
+[session]
+format = "jsonl"
+# Codex 会话存储在 sessions/YYYY/MM/DD/ 日期子目录下
+# 文件名格式: rollout-YYYY-MM-DDThh-mm-ss-<UUID>.jsonl
+# codex::scan_sessions() 递归扫描 sessions/ 目录，不使用 glob
+path = "sessions"
+glob = "*.jsonl"
+resume_command = "codex resume {id}"
+
+[plugin]
+format = "toml_table"
+path = "config.toml"
+plugins_key = "plugins"
+manifest_dir = ".codex-plugin"
+manifest_file = "plugin.json"
+install_dir = "plugins/cache"

@@ -1,0 +1,83 @@
+[source]
+
+[source.path.linux]
+base_dir = "config"
+subdir = "CherryStudio"
+
+[source.path.macos]
+base_dir = "data"
+subdir = "CherryStudio"
+
+[source.path.windows]
+base_dir = "data"
+subdir = "CherryStudio"
+
+[leveldb]
+relative_path = "Local Storage/leveldb"
+# LevelDB 中 redux-persist 数据的 key
+persist_key = "_file://\\x00\\x01persist:cherry-studio"
+
+# ══════════════════════════════════════════════════════════
+# Provider 类型映射：Cherry Studio type → VCC type
+# ══════════════════════════════════════════════════════════
+
+[provider_type_map]
+"anthropic" = "anthropic"
+"vertex-anthropic" = "anthropic"
+"openai" = "openai"
+"openai-response" = "openai"
+"new-api" = "openai"
+"gateway" = "openai"
+"gemini" = "google"
+"vertexai" = "google"
+"azure-openai" = "azure"
+"ollama" = "ollama"
+"mistral" = "mistral"
+"aws-bedrock" = "bedrock"
+
+# ══════════════════════════════════════════════════════════
+# MCP Server 类型映射：Cherry Studio type → VCC type
+# ══════════════════════════════════════════════════════════
+
+[mcp_type_map]
+"stdio" = "stdio"
+"sse" = "sse"
+"streamableHttp" = "streamable-http"
+# inMemory 类型跳过不导入
+
+# ══════════════════════════════════════════════════════════
+# 跳过规则
+# ══════════════════════════════════════════════════════════
+
+# 跳过以这些前缀开头的 MCP server name
+mcp_skip_prefixes = ["@cherry/"]
+
+# 没有 api_key 时仍可导入的 provider 类型
+provider_no_key_types = ["ollama"]
+
+# ══════════════════════════════════════════════════════════
+# MCP extra 字段：从 Cherry Studio JSON 提取到 McpConfig.extra
+# ══════════════════════════════════════════════════════════
+
+# 这些字段会从 Cherry Studio JSON 中读取并存入 McpConfig.extra
+mcp_extra_fields = ["timeout", "longRunning", "registryUrl"]
+
+# MCP metadata 字段映射：Cherry Studio JSON 字段 → VCC Metadata 字段
+# 按优先级排列，第一个非空的值会被使用
+[mcp_metadata_map]
+homepage = ["reference", "providerUrl", "logoUrl"]
+
+# Provider metadata 字段映射
+[provider_metadata_map]
+homepage = ["providerUrl", "logoUrl"]
+
+# Provider extra 字段：从 Cherry Studio JSON 提取到 ProviderConfig.extra
+provider_extra_fields = ["apiVersion"]
+
+# ══════════════════════════════════════════════════════════
+# isVertex 组合规则：isVertex=true 时覆盖原始 provider type
+# ══════════════════════════════════════════════════════════
+
+[is_vertex_override]
+"anthropic" = "vertex-anthropic"
+"gemini" = "vertexai"

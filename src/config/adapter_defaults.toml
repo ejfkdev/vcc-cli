@@ -1,0 +1,42 @@
+# 适配器默认值：工具适配中的硬编码默认配置
+# 编译时通过 include_str!() 嵌入程序
+
+[defaults]
+env_field = "env"
+disabled_tools_field = "disabledTools"
+hook_timeout = 30
+sensitive_keywords = ["key", "token", "secret", "password", "credential", "auth"]
+sync_tag = "synced"
+sync_description_format = "Synced from {}"
+
+[cache]
+skills_dir = "cache/skills"
+plugins_dir = "cache/plugins"
+
+[plugin_manifest_dirs]
+claude = ".claude-plugin"
+codex = ".codex-plugin"
+droid = ".factory-plugin"
+
+[plugin_manifest_files]
+gemini = "gemini-extension.json"
+_default = "plugin.json"
+
+# ══════════════════════════════════════════════════════════
+# 默认模型 fallback：工具未指定模型时使用
+# ══════════════════════════════════════════════════════════
+
+[default_models]
+claude = "claude-sonnet-4"
+gemini = "gemini-2.5-pro"
+kimi = "kimi"
+codex = "unknown"
+
+# ══════════════════════════════════════════════════════════
+# OpenCode 专用默认值
+# ══════════════════════════════════════════════════════════
+
+[opencode]
+schema_url = "https://opencode.ai/config.json"
+default_npm = "@ai-sdk/openai-compatible"
+default_context_limit = 200000
