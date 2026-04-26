@@ -503,7 +503,19 @@ fn parse_file_sequential(
                 }
             }
         }
-        process_assistant_line(&line, &tree, messages);
+        if let Some((id, entry)) = process_assistant_line(&line, &tree) {
+            let should_insert = match messages.get(&id) {
+                None => true,
+                Some(old) => {
+                    (!old.has_stop && entry.has_stop)
+                        || (old.has_stop == entry.has_stop
+                            && entry.usage.output_tokens > old.usage.output_tokens)
+                }
+            };
+            if should_insert {
+                messages.insert(id, entry);
+            }
+        }
     }
     Ok(if from_byte > 0 { from_byte } else { 0 })
 }
@@ -557,20 +569,16 @@ fn parse_file_tail_mmap(
         0
     };
 
-    // 分行：用 memchr 一次扫描找所有换行符位置
+    // 分行：直接从 memchr 迭代器构建行范围列表，避免中间 Vec<usize>
     let t_lines = std::time::Instant::now();
-    let nl_positions: Vec<usize> = memchr::memchr_iter(b'\n', &data[bs_offset..])
-        .map(|p| bs_offset + p)
-        .collect();
-
-    // 构建行范围列表 (start, end)
-    let mut line_ranges: Vec<(usize, usize)> = Vec::with_capacity(nl_positions.len() + 1);
+    let mut line_ranges: Vec<(usize, usize)> = Vec::new();
     let mut prev = bs_offset;
-    for &nl in &nl_positions {
-        if nl > prev {
-            line_ranges.push((prev, nl));
+    for nl_pos in memchr::memchr_iter(b'\n', &data[bs_offset..]) {
+        let abs_pos = bs_offset + nl_pos;
+        if abs_pos > prev {
+            line_ranges.push((prev, abs_pos));
         }
-        prev = nl + 1;
+        prev = abs_pos + 1;
     }
     if prev < data.len() {
         line_ranges.push((prev, data.len()));
@@ -604,30 +612,25 @@ fn parse_file_tail_mmap(
             matched_texts.len(), line_ranges.len());
     }
 
-    // JSON 解析
+    // JSON 解析：每行直接返回 Option<(String, MsgEntry)>，避免 per-line HashMap 分配
     let tree = build_pointer_tree();
     let t_parse = std::time::Instant::now();
 
-    let local_maps: Vec<HashMap<String, MsgEntry>> = if use_rayon {
+    let pairs: Vec<(String, MsgEntry)> = if use_rayon {
         use rayon::prelude::*;
         matched_texts.par_iter().filter_map(|line| {
-            let mut msgs = HashMap::new();
-            process_assistant_line(line, &tree, &mut msgs);
-            if msgs.is_empty() { None } else { Some(msgs) }
+            process_assistant_line(line, &tree)
         }).collect()
     } else {
         matched_texts.iter().filter_map(|line| {
-            let mut msgs = HashMap::new();
-            process_assistant_line(line, &tree, &mut msgs);
-            if msgs.is_empty() { None } else { Some(msgs) }
+            process_assistant_line(line, &tree)
         }).collect()
     };
     // merge with pre-allocation
-    if messages.is_empty() && !local_maps.is_empty() {
-        let total_entries: usize = local_maps.iter().map(|m| m.len()).sum();
-        messages.reserve(total_entries);
+    if messages.is_empty() && !pairs.is_empty() {
+        messages.reserve(pairs.len());
     }
-    for local in local_maps { merge_msg_entries(messages, local); }
+    merge_pairs(messages, pairs);
 
     if is_large {
         eprintln!("[PERF]       parallel_parse: {:.1}ms", t_parse.elapsed().as_secs_f64() * 1000.0);
@@ -640,6 +643,26 @@ fn parse_file_tail_mmap(
     }
 
     Ok(bs_offset as u64)
+}
+
+/// 合并 (id, MsgEntry) 对到主 HashMap
+fn merge_pairs(
+    messages: &mut HashMap<String, MsgEntry>,
+    pairs: Vec<(String, MsgEntry)>,
+) {
+    for (id, entry) in pairs {
+        let should_insert = match messages.get(&id) {
+            None => true,
+            Some(old) => {
+                (!old.has_stop && entry.has_stop)
+                    || (old.has_stop == entry.has_stop
+                        && entry.usage.output_tokens > old.usage.output_tokens)
+            }
+        };
+        if should_insert {
+            messages.insert(id, entry);
+        }
+    }
 }
 
 /// 合并解析结果到主 HashMap
@@ -674,32 +697,31 @@ fn build_pointer_tree() -> PointerTree {
     tree
 }
 
-/// 处理一行 assistant 消息，提取 usage 数据并插入 HashMap
-#[allow(clippy::too_many_arguments)]
+/// 处理一行 assistant 消息，提取 usage 数据
+/// 返回 (message_id, MsgEntry) 或 None
 fn process_assistant_line(
     line: &str,
     tree: &PointerTree,
-    messages: &mut HashMap<String, MsgEntry>,
-) {
+) -> Option<(String, MsgEntry)> {
     let nodes = match get_many(line, tree) {
         Ok(n) => n,
-        Err(_) => return,
+        Err(_) => return None,
     };
-    process_line_nodes(&nodes, messages);
+    process_line_nodes(&nodes)
 }
 
 /// 从已提取的节点处理 assistant 消息
+/// 返回 (message_id, MsgEntry) 或 None
 fn process_line_nodes(
     nodes: &[Option<sonic_rs::LazyValue<'_>>],
-    messages: &mut HashMap<String, MsgEntry>,
-) {
+) -> Option<(String, MsgEntry)> {
     // [0] message.id
     let id_str = match nodes.first().and_then(|n| n.as_ref()) {
         Some(v) => match v.as_str() {
             Some(s) => s,
-            None => return,
+            None => return None,
         },
-        None => return,
+        None => return None,
     };
     // [1] message.model（先检查 synthetic，避免不必要的 String 分配）
     let model_str = nodes
@@ -709,7 +731,7 @@ fn process_line_nodes(
         .unwrap_or("claude-sonnet-4");
     // 跳过 <synthetic> 模型
     if model_str.starts_with('<') {
-        return;
+        return None;
     }
     // [2] message.stop_reason — null 或 missing 视为无 stop
     let has_stop = nodes
@@ -720,9 +742,9 @@ fn process_line_nodes(
     let usage: ClaudeUsage = match nodes.get(3).and_then(|n| n.as_ref()) {
         Some(v) => match sonic_rs::from_str(v.as_raw_str()) {
             Ok(u) => u,
-            Err(_) => return,
+            Err(_) => return None,
         },
-        None => return,
+        None => return None,
     };
     // [4] costUSD
     let cost_usd = nodes
@@ -738,25 +760,7 @@ fn process_line_nodes(
         .and_then(|v| v.as_str())
         .and_then(super::parse_iso_timestamp)
         .unwrap_or(0);
-    // 相同 messageId 的 streaming 更新：后出现的 token 值更大（单调递增）
-    // 倒序路径：首次遇到即最大值 → 直接插入
-    // 顺序路径：后出现的更大 → 需要替换旧值
-    // 策略：总是插入/替换，但优先保留有 stop_reason 的条目
-    let should_insert = match messages.get(id_str) {
-        None => true,
-        Some(old) => {
-            // 已有 stop_reason 的不丢弃，除非新条目也有 stop 且 token 更大
-            if old.has_stop && !has_stop {
-                false
-            } else {
-                true // 新条目 token 更大或 stop 状态相同/更好
-            }
-        }
-    };
-    if !should_insert {
-        return;
-    }
-    messages.insert(
+    Some((
         id_str.to_string(),
         MsgEntry {
             model: model_str.to_string(),
@@ -766,7 +770,7 @@ fn process_line_nodes(
             cost_usd,
             timestamp_ms,
         },
-    );
+    ))
 }
 
 /// 解析主文件对应的 subagents/ 目录下所有 agent-*.jsonl
@@ -860,7 +864,7 @@ fn summarize_messages(
             count: 0,
             cost: 0.0,
         });
-        entry.usage += msg.usage.clone();
+        entry.usage.add_assign_from(&msg.usage);
         entry.count += 1;
         if let Some(c) = msg.cost_usd {
             entry.cost += c;
@@ -1049,7 +1053,7 @@ mod test_unknown_fields {
         parse_file_sequential(path, 0, &mut seq_messages, 0, None).unwrap();
 
         let mut mmap_messages: HashMap<String, MsgEntry> = HashMap::new();
-        parse_file_tail_mmap(path, &mut mmap_messages, &[], None).unwrap();
+        parse_file_tail_mmap(path, &mut mmap_messages, &[], None, true).unwrap();
 
         assert_eq!(mmap_messages.len(), seq_messages.len(), "mmap and sequential should find same number of entries");
     }

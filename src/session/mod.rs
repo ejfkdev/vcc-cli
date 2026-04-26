@@ -415,7 +415,7 @@ fn merge_with_cache_and_subagent(
         let date = u.date.clone().unwrap_or_default();
         let key = (u.model.clone(), date);
         let e = merged.entry(key).or_default();
-        e.0 += u.usage.clone();
+        e.0.add_assign_from(&u.usage);
         e.1 += u.request_count;
         if u.cost_usd.is_some() {
             e.2 = u.cost_usd;

@@ -34,6 +34,13 @@ pub(crate) struct TokenUsage {
 
 impl std::ops::AddAssign for TokenUsage {
     fn add_assign(&mut self, other: Self) {
+        self.add_assign_from(&other);
+    }
+}
+
+impl TokenUsage {
+    /// 从引用累加，避免 clone
+    pub(crate) fn add_assign_from(&mut self, other: &Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
         self.cache_read_tokens += other.cache_read_tokens;
