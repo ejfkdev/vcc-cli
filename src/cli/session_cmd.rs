@@ -299,6 +299,7 @@ fn save_usage_cache_entry(
             codex_prev_total: None,
             codex_current_model: None,
             subagent_files: HashMap::new(),
+            parsed_range_start_ms: None,
         },
     );
 }
@@ -522,6 +523,10 @@ pub(crate) fn show_usage(
     to: Option<&str>,
     by: Option<&str>,
 ) -> Result<()> {
+    let t_total = std::time::Instant::now();
+
+    // ── Stage 1: load_mappings ──
+    let t0 = std::time::Instant::now();
     let mappings = load_mappings(tool)?;
     let from_ms = from
         .map(|d| {
@@ -546,11 +551,19 @@ pub(crate) fn show_usage(
     } else {
         range
     };
+    eprintln!("[PERF] 1.load_mappings: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+
+    // ── Stage 2: scan_sessions (file glob + metadata) ──
+    let t1 = std::time::Instant::now();
     let all_sessions = scan_all_sessions(&mappings, effective_range.start_ms());
+    eprintln!("[PERF] 2.scan_sessions: {:.1}ms ({} sessions)", t1.elapsed().as_secs_f64() * 1000.0, all_sessions.len());
     if all_sessions.is_empty() {
         println!("No sessions found.");
         return Ok(());
     }
+
+    // ── Stage 3: extract_all_usage (cache + parse + summarize) ──
+    let t2 = std::time::Instant::now();
     let summaries: Vec<UsageSummary> =
         session::extract_all_usage(&all_sessions, &mappings, effective_range)
             .into_iter()
@@ -568,6 +581,8 @@ pub(crate) fn show_usage(
                 true
             })
             .collect();
+    eprintln!("[PERF] 3.extract_all_usage: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
+
     if summaries.is_empty() {
         if is_json_mode() {
             output_json(&serde_json::json!([]));
@@ -576,8 +591,15 @@ pub(crate) fn show_usage(
         }
         return Ok(());
     }
+
+    // ── Stage 4: aggregate + price calculation ──
+    let t3 = std::time::Instant::now();
     let dims = parse_by_dims(by);
     let aggregated = aggregate_by_dims(&summaries, &dims);
+    eprintln!("[PERF] 4.aggregate+price: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
+
+    // ── Stage 5: output ──
+    let t4 = std::time::Instant::now();
     if is_json_mode() {
         output_json(&serde_json::json!(aggregated.iter().map(|r| {
             let mut obj = serde_json::json!({
@@ -594,9 +616,11 @@ pub(crate) fn show_usage(
             obj.as_object_mut().unwrap().insert("cost".into(), cost);
             obj
         }).collect::<Vec<_>>()));
-        return Ok(());
+    } else {
+        print_usage_table(&aggregated, &dims, &range, from, to);
     }
-    print_usage_table(&aggregated, &dims, &range, from, to);
+    eprintln!("[PERF] 5.output: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
+    eprintln!("[PERF] TOTAL: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
     Ok(())
 }
 

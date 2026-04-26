@@ -79,8 +79,12 @@ pub(crate) fn extract_all_usage(
     mappings: &[ToolMapping],
     range: TimeRange,
 ) -> Vec<UsageSummary> {
+    let t0 = std::time::Instant::now();
     let start_ms = range.start_ms();
     let mut cache = UnifiedCache::load().ok().unwrap_or_default();
+    eprintln!("[PERF]   3a.cache_load: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+
+    let t_upsert = std::time::Instant::now();
     let mut cache_dirty = false;
 
     // 阶段 1：串行更新 session 元数据
@@ -89,6 +93,7 @@ pub(crate) fn extract_all_usage(
             cache_dirty = true;
         }
     }
+    eprintln!("[PERF]   3b.cache_upsert: {:.1}ms", t_upsert.elapsed().as_secs_f64() * 1000.0);
 
     let filtered: Vec<&SessionMeta> = sessions
         .iter()
@@ -109,104 +114,36 @@ pub(crate) fn extract_all_usage(
         })
         .collect();
 
-    // 阶段 2：并行提取 usage（range_start_ms 用于解析层提前终止，时间过滤在输出阶段进行）
-    use rayon::prelude::*;
+    // 按文件大小降序排列，确保大 session 配对处理（减少总 wall time）
+    let mut filtered = filtered;
+    filtered.sort_by(|a, b| b.file_size.cmp(&a.file_size));
+
+    // 阶段 2：提取 usage
+    // 策略：session 间并行处理（2个一批），session 内 main→sub 串行
+    // main 用全局 rayon，sub 用独立 sub_pool，避免线程池争抢
+    let t1 = std::time::Instant::now();
+
     let results: Vec<ExtractResult> = filtered
-        .par_iter()
-        .filter_map(|session| {
-            let mapping = mappings.iter().find(|m| m.tool.name == session.tool)?;
-            let status = cache.check_cache_status(&session.tool, &session.session_id, &session.source_path);
-
-            // 当 range_start_ms 为 None（--all）但缓存只包含部分数据时，
-            // 需要按 Miss 处理以解析缺失范围
-            let effective_status = if status == CacheStatus::Hit && start_ms.is_none() {
-                let file_size = std::fs::metadata(&session.source_path).map(|m| m.len()).unwrap_or(0);
-                let is_complete = cache.get_usage(&session.tool, &session.session_id)
-                    .is_some_and(|u| u.is_fully_processed(file_size));
-                if is_complete { CacheStatus::Hit } else { CacheStatus::Miss }
-            } else {
-                status
-            };
-
-            let (usages, usage_data): (Vec<UsageSummary>, Option<CachedUsageData>) = match effective_status {
-                CacheStatus::Hit => {
-                    // 直接从缓存加载全部数据
-                    let usages = cache.load_usages_in_range(
-                        &session.tool, &session.session_id, None,
-                    );
-                    (usages, None)
-                }
-                CacheStatus::Incremental => {
-                    // 增量读取新部分并合并缓存
-                    let cached = cache.get_usage(&session.tool, &session.session_id);
-                    match cached {
-                        Some(ce) => {
-                            let subagent_changed = check_subagent_changes(session, ce);
-                            match incremental_extract(mapping, session, ce, subagent_changed) {
-                                Ok((merged_usages, st, fbo, subagent_state)) => {
-                                    let new_data = build_usage_data(
-                                        session, &merged_usages, st.as_ref(), Some(ce), fbo, subagent_state,
-                                    );
-                                    (merged_usages, new_data)
-                                }
-                                Err(_) => {
-                                    let r = extract_usage(mapping, session, start_ms).ok()?;
-                                    let new_data = build_usage_data(
-                                        session, &r.usages, None, Some(ce), r.first_byte_offset, r.subagent_files,
-                                    );
-                                    (r.usages, new_data)
-                                }
-                            }
-                        }
-                        None => {
-                            let r = extract_usage(mapping, session, start_ms).ok()?;
-                            let new_data = build_usage_data(
-                                session, &r.usages, None, None, r.first_byte_offset, r.subagent_files,
-                            );
-                            (r.usages, new_data)
-                        }
-                    }
-                }
-                CacheStatus::Miss => {
-                    // 获取缓存中的已处理字节范围（用于跳过已扫描的字节段）
-                    let cached_usage = cache.get_usage(&session.tool, &session.session_id);
-                    let skip_ranges: Vec<(usize, usize)> = cached_usage
-                        .map(|u| u.effective_processed_ranges())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(s, e)| (s as usize, e as usize))
-                        .collect();
-
-                    if session.tool == "claude" && !skip_ranges.is_empty() {
-                        // 有已缓存的字节范围：只解析未处理部分，然后与缓存数据合并
-                        let r = claude::extract_usage_with_skip(session, &skip_ranges, start_ms).ok()?;
-                        let mut all_usages = cache.load_usages_in_range(
-                            &session.tool, &session.session_id, None,
-                        );
-                        all_usages.extend(r.usages.clone());
-                        let new_data = build_usage_data(
-                            session, &r.usages, None, cached_usage, r.first_byte_offset, r.subagent_files,
-                        );
-                        (all_usages, new_data)
-                    } else {
-                        // 无缓存数据：全量解析（传递 range_start_ms 以加速 mmap 提前终止）
-                        let r = extract_usage(mapping, session, start_ms).ok()?;
-                        let new_data = build_usage_data(
-                            session, &r.usages, None, None, r.first_byte_offset, r.subagent_files,
-                        );
-                        (r.usages, new_data)
-                    }
-                }
-            };
-            Some(ExtractResult {
-                tool: session.tool.clone(),
-                session_id: session.session_id.clone(),
-                usages,
-                usage_data,
+        .chunks(2)
+        .flat_map(|chunk| {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|session| {
+                        s.spawn(|| process_session(session, mappings, &cache, start_ms))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .filter_map(|h| h.join().ok().flatten())
+                    .collect::<Vec<_>>()
             })
         })
         .collect();
 
+    eprintln!("[PERF]   3c.parallel_extract: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
+
+    let t2 = std::time::Instant::now();
     let mut summaries: Vec<UsageSummary> = Vec::new();
     for r in results {
         if let Some(data) = r.usage_data {
@@ -221,6 +158,7 @@ pub(crate) fn extract_all_usage(
             eprintln!("warning: failed to save cache: {}", e);
         }
     }
+    eprintln!("[PERF]   3d.cache_save+merge: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
     // 输出阶段按日期过滤
     filter_by_date(summaries, start_ms)
 }
@@ -247,6 +185,127 @@ struct ExtractResult {
     session_id: String,
     usages: Vec<UsageSummary>,
     usage_data: Option<CachedUsageData>,
+}
+
+/// 处理单个 session 的 usage 提取（用于并行调度）
+fn process_session(
+    session: &SessionMeta,
+    mappings: &[ToolMapping],
+    cache: &UnifiedCache,
+    start_ms: Option<i64>,
+) -> Option<ExtractResult> {
+    let mapping = mappings.iter().find(|m| m.tool.name == session.tool)?;
+    let status = cache.check_cache_status(&session.tool, &session.session_id, &session.source_path);
+
+    let cache_range_compatible = cache.get_usage(&session.tool, &session.session_id)
+        .is_none_or(|u| {
+            if start_ms.is_none() && u.parsed_range_start_ms.is_some() {
+                return false;
+            }
+            true
+        });
+
+    let effective_status = if !cache_range_compatible {
+        CacheStatus::Miss
+    } else if status == CacheStatus::Hit && start_ms.is_none() {
+        let file_size = std::fs::metadata(&session.source_path).map(|m| m.len()).unwrap_or(0);
+        let is_complete = cache.get_usage(&session.tool, &session.session_id)
+            .is_some_and(|u| u.is_fully_processed(file_size));
+        if is_complete { CacheStatus::Hit } else { CacheStatus::Miss }
+    } else {
+        status
+    };
+
+    let cached_usage = if cache_range_compatible {
+        cache.get_usage(&session.tool, &session.session_id).cloned()
+    } else {
+        None
+    };
+
+    let (usages, usage_data): (Vec<UsageSummary>, Option<CachedUsageData>) = match effective_status {
+        CacheStatus::Hit => {
+            let usages = cache.load_usages_in_range(&session.tool, &session.session_id, None);
+            (usages, None)
+        }
+        CacheStatus::Incremental => {
+            match cached_usage {
+                Some(ce) => {
+                    let subagent_changed = check_subagent_changes(session, &ce);
+                    if subagent_changed {
+                        let r = extract_usage(mapping, session, start_ms).ok()?;
+                        let new_data = build_usage_data(
+                            session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                        );
+                        (r.usages, new_data)
+                    } else {
+                        match incremental_extract(mapping, session, &ce, false) {
+                            Ok((merged_usages, st, fbo, subagent_state)) => {
+                                let new_data = build_usage_data(
+                                    session, &merged_usages, st.as_ref(), Some(&ce), fbo, subagent_state, start_ms,
+                                );
+                                (merged_usages, new_data)
+                            }
+                            Err(_) => {
+                                let r = extract_usage(mapping, session, start_ms).ok()?;
+                                let new_data = build_usage_data(
+                                    session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                                );
+                                (r.usages, new_data)
+                            }
+                        }
+                    }
+                }
+                None => {
+                    let r = extract_usage(mapping, session, start_ms).ok()?;
+                    let new_data = build_usage_data(
+                        session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                    );
+                    (r.usages, new_data)
+                }
+            }
+        }
+        CacheStatus::Miss => {
+            if session.tool == "claude" && cached_usage.is_some() {
+                let ce = cached_usage.unwrap();
+                let subagent_changed = check_subagent_changes(session, &ce);
+                if subagent_changed {
+                    let r = extract_usage(mapping, session, start_ms).ok()?;
+                    let new_data = build_usage_data(
+                        session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                    );
+                    (r.usages, new_data)
+                } else {
+                    match incremental_extract(mapping, session, &ce, false) {
+                        Ok((merged_usages, st, fbo, subagent_state)) => {
+                            let new_data = build_usage_data(
+                                session, &merged_usages, st.as_ref(), Some(&ce), fbo, subagent_state, start_ms,
+                            );
+                            (merged_usages, new_data)
+                        }
+                        Err(_) => {
+                            let r = extract_usage(mapping, session, start_ms).ok()?;
+                            let new_data = build_usage_data(
+                                session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                            );
+                            (r.usages, new_data)
+                        }
+                    }
+                }
+            } else {
+                let r = extract_usage(mapping, session, start_ms).ok()?;
+                let new_data = build_usage_data(
+                    session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                );
+                (r.usages, new_data)
+            }
+        }
+    };
+    Some(ExtractResult {
+        tool: session.tool.clone(),
+        session_id: session.session_id.clone(),
+        usages,
+        usage_data,
+    })
 }
 
 fn incremental_extract(
@@ -423,6 +482,7 @@ fn build_usage_data(
     prev_data: Option<&CachedUsageData>,
     first_byte_offset: u64,
     subagent_files: HashMap<String, SubagentFileState>,
+    range_start_ms: Option<i64>,
 ) -> Option<CachedUsageData> {
     let (_modified_ms, file_size) = match file_meta(&session.source_path) {
         Some(m) => m,
@@ -442,15 +502,10 @@ fn build_usage_data(
     }
 
     // 按 (date, model) 聚合为 daily
+    // 注意：不从 prev_data 导入 daily 数据，因为 usages 已经是完整的数据
+    // prev_data 只用于继承 processed_ranges、codex 状态等元信息
     let mut daily: std::collections::HashMap<String, Vec<CachedDailyUsage>> =
         std::collections::HashMap::new();
-
-    // 如果有之前的缓存数据，先导入
-    if let Some(prev) = prev_data {
-        for (date, entries) in &prev.daily {
-            daily.insert(date.clone(), entries.clone());
-        }
-    }
 
     // 合并新数据
     for u in usages {
@@ -493,6 +548,7 @@ fn build_usage_data(
         codex_prev_total: cpt,
         codex_current_model: ccm,
         subagent_files,
+        parsed_range_start_ms: range_start_ms,
     })
 }
 
@@ -566,8 +622,10 @@ pub(crate) fn dir_size(path: &Path) -> u64 {
 }
 pub(crate) fn format_number(n: i64) -> String {
     match n {
-        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
-        n if n >= 1_000 => format!("{:.1}K", n as f64 / 1_000.0),
+        n if n >= 1_000_000_000_000 => format!("{:.2}T", n as f64 / 1_000_000_000_000.0),
+        n if n >= 1_000_000_000 => format!("{:.2}B", n as f64 / 1_000_000_000.0),
+        n if n >= 1_000_000 => format!("{:.2}M", n as f64 / 1_000_000.0),
+        n if n >= 1_000 => format!("{:.2}K", n as f64 / 1_000.0),
         _ => n.to_string(),
     }
 }

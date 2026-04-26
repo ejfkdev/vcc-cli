@@ -114,6 +114,10 @@ pub(crate) struct CachedUsageData {
     /// 跟踪每个 subagent 文件的状态（文件名 → 状态）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub subagent_files: HashMap<String, SubagentFileState>,
+    /// 上次解析时使用的 range_start_ms（None=全量解析，Some(ms)=只解析了 ms 之后的数据）
+    /// 用于检测缓存数据是否完整：如果缓存是范围解析但请求全量，需要按 Miss 处理
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_range_start_ms: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -186,7 +190,7 @@ pub(crate) enum CacheStatus {
 }
 
 impl JsonCache for UnifiedCache {
-    const VERSION: u32 = 9;
+    const VERSION: u32 = 10;
     const FILE_NAME: &'static str = "session-cache.json";
     fn version(&self) -> u32 {
         self.version

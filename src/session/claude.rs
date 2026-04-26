@@ -20,15 +20,43 @@ fn extract_line_timestamp_ms(line: &[u8]) -> Option<i64> {
     super::parse_iso_timestamp(ts_str)
 }
 
-/// 记录一行在 mmap 中的字节范围（零拷贝引用）
-struct LineRef {
-    start: usize,
-    end: usize,
-}
-
-/// 并行解析结果
-struct ParallelResult {
-    messages: HashMap<String, MsgEntry>,
+/// 二分查找：在 data 中找时间戳 >= target_ms 的最小行偏移
+fn find_range_start_offset_fn(data: &[u8], target_ms: i64) -> usize {
+    let mut lo: usize = 0;
+    let mut hi: usize = data.len();
+    for _ in 0..20 {
+        let mid = lo + (hi - lo) / 2;
+        let sample_start = mid.saturating_sub(100);
+        let sample_end = (mid + 1_000_000).min(data.len());
+        let sample = &data[sample_start..sample_end];
+        let first_nl = match memchr::memchr(b'\n', sample) {
+            Some(nl) => nl + 1,
+            None => continue,
+        };
+        let mut found_ts: Option<i64> = None;
+        let mut pos = first_nl;
+        for _ in 0..50 {
+            let nl = match memchr::memchr(b'\n', &sample[pos..]) {
+                Some(nl) => pos + nl,
+                None => break,
+            };
+            let line = &sample[pos..nl];
+            let check_end = line.len().min(300);
+            if memchr::memmem::find(&line[..check_end], b"\"timestamp\":\"").is_some() {
+                if let Some(ts) = extract_line_timestamp_ms(line) {
+                    found_ts = Some(ts);
+                    break;
+                }
+            }
+            pos = nl + 1;
+        }
+        match found_ts {
+            Some(_ts) if _ts >= target_ms => hi = mid,
+            Some(_) => lo = mid,
+            None => lo = mid,
+        }
+    }
+    lo.saturating_sub(1_000_000)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -290,42 +318,41 @@ pub(crate) fn extract_usage(
     session: &SessionMeta,
     range_start_ms: Option<i64>,
 ) -> Result<ExtractResult> {
-    let mut messages: HashMap<String, MsgEntry> = HashMap::new();
-    // 1. 解析主文件
-    let fbo = parse_file_into_messages(&session.source_path, 0, &mut messages, &[], range_start_ms)?;
-    // 2. 解析 subagent 文件（并行）
-    let (subagent_files, sub_results) = parse_subagent_messages_parallel(&session.source_path, range_start_ms)?;
-    for sub_msgs in sub_results {
-        merge_msg_entries(&mut messages, sub_msgs);
-    }
-    // 3. 汇总
-    let result = ExtractResult {
-        usages: summarize_messages(&session.tool, &messages, session.last_active_at)?,
-        first_byte_offset: fbo,
-        subagent_files,
-    };
-    Ok(result)
-}
+    let t0 = std::time::Instant::now();
 
-/// 带 skip_ranges 的 usage 提取（用于 mod.rs 传递缓存已处理范围）
-pub(crate) fn extract_usage_with_skip(
-    session: &SessionMeta,
-    skip_ranges: &[(usize, usize)],
-    range_start_ms: Option<i64>,
-) -> Result<ExtractResult> {
+    let tool = session.tool.clone();
+    let last_active_at = session.last_active_at;
+    let file_size = session.file_size;
+
+    // 先解析 main（独占全局 rayon），再解析 subagent（独立线程池）
     let mut messages: HashMap<String, MsgEntry> = HashMap::new();
-    let fbo = parse_file_into_messages(
-        &session.source_path, 0, &mut messages, skip_ranges, range_start_ms,
-    )?;
+    let fbo = parse_file_into_messages(&session.source_path, 0, &mut messages, &[], range_start_ms, true)?;
+    let main_elapsed = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t_sub = std::time::Instant::now();
     let (subagent_files, sub_results) = parse_subagent_messages_parallel(&session.source_path, range_start_ms)?;
+    let sub_elapsed = t_sub.elapsed().as_secs_f64() * 1000.0;
+
+    let t2 = std::time::Instant::now();
     for sub_msgs in sub_results {
         merge_msg_entries(&mut messages, sub_msgs);
     }
+    let t3 = std::time::Instant::now();
+
     let result = ExtractResult {
-        usages: summarize_messages(&session.tool, &messages, session.last_active_at)?,
+        usages: summarize_messages(&tool, &messages, last_active_at)?,
         first_byte_offset: fbo,
         subagent_files,
     };
+
+    if file_size > 10 * 1024 * 1024 {
+        let wall = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("[PERF]     {} wall={:.0}ms(main={:.0}ms,sub={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
+            session.source_path.file_name().unwrap_or_default().to_string_lossy(),
+            wall, main_elapsed, sub_elapsed,
+            (t3-t2).as_secs_f64()*1000.0, (std::time::Instant::now()-t3).as_secs_f64()*1000.0,
+            file_size as f64 / 1e6);
+    }
     Ok(result)
 }
 
@@ -335,7 +362,7 @@ pub(crate) fn extract_usage_incremental(
 ) -> Result<Vec<UsageSummary>> {
     let mut messages: HashMap<String, MsgEntry> = HashMap::new();
     // 只读主文件新增字节（增量路径不需要 range_start_ms 过滤）
-    let _ = parse_file_into_messages(&session.source_path, from_byte, &mut messages, &[], None)?;
+    let _ = parse_file_into_messages(&session.source_path, from_byte, &mut messages, &[], None, true)?;
     summarize_messages(&session.tool, &messages, session.last_active_at)
 }
 
@@ -381,7 +408,7 @@ pub(crate) fn extract_subagent_incremental(
             continue;
         }
 
-        let _ = parse_file_into_messages(&path, 0, &mut messages, &[], None);
+        let _ = parse_file_into_messages(&path, 0, &mut messages, &[], None, false);
     }
 
     let usages = summarize_messages(&session.tool, &messages, session.last_active_at)?;
@@ -391,29 +418,36 @@ pub(crate) fn extract_subagent_incremental(
 /// 从单个 JSONL 文件解析 assistant messages 到共享 HashMap
 /// 使用 sonic-rs get_many 惰性提取字段，跳过 content 数组分配
 /// 返回 first_byte_offset（0=全量读取，>0=尾部读取起始位置）
+/// use_rayon: 是否在 mmap 路径中使用 rayon 并行 JSON 解析（主文件用 true，subagent 用 false）
 fn parse_file_into_messages(
     path: &Path,
     from_byte: u64,
     messages: &mut HashMap<String, MsgEntry>,
     skip_ranges: &[(usize, usize)],
     range_start_ms: Option<i64>,
+    use_rayon: bool,
 ) -> Result<u64> {
     let file = std::fs::File::open(path)?;
     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
 
-    // 决定读取模式
+    // 增量读取
     if from_byte > 0 {
-        // 增量读取：从 from_byte 往后读（读到末尾）
-        return parse_file_sequential(path, from_byte, messages, 0);
+        return parse_file_sequential(path, from_byte, messages, 0, None);
     }
-    if file_size > 4 * 1024 * 1024 {
-        // 大文件：mmap 反向扫描 + skip_ranges 跳过已处理字节 + range_start_ms 提前终止
-        return parse_file_tail_mmap(path, messages, skip_ranges, range_start_ms);
+
+    // 大文件：mmap 二分查找 + memchr 分行 + memmem 过滤 + JSON 解析
+    // 阈值：有 range_start_ms 时降到 1MB（利用 binary search 跳过旧数据），否则 64MB
+    let mmap_threshold = if range_start_ms.is_some() { 1024 * 1024 } else { 64 * 1024 * 1024 };
+    if file_size > mmap_threshold {
+        return parse_file_tail_mmap(path, messages, skip_ranges, range_start_ms, use_rayon);
     }
-    // 全量读取
-    parse_file_sequential(path, 0, messages, 0)
+
+    // 小文件：全量顺序读取
+    parse_file_sequential(path, 0, messages, 0, range_start_ms)
 }
 
+/// 顺序读取（全量/增量）
+/// 读取 [from_byte, end_byte) 范围，end_byte=0 表示读到文件末尾
 /// 顺序读取（全量/增量）
 /// 读取 [from_byte, end_byte) 范围，end_byte=0 表示读到文件末尾
 fn parse_file_sequential(
@@ -421,8 +455,9 @@ fn parse_file_sequential(
     from_byte: u64,
     messages: &mut HashMap<String, MsgEntry>,
     end_byte: u64,
+    range_start_ms: Option<i64>,
 ) -> Result<u64> {
-    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024 * 1024, std::fs::File::open(path)?);
     if from_byte > 0 {
         reader.seek(SeekFrom::Start(from_byte))?;
     }
@@ -445,182 +480,163 @@ fn parse_file_sequential(
         if !is_assistant_line(&line) {
             continue;
         }
+        // 时间戳过滤：跳过早于 range_start_ms 的行
+        if let Some(rms) = range_start_ms {
+            if let Some(ts) = line.find("\"timestamp\":\"").and_then(|p| {
+                let start = p + 13;
+                line[start..].find('"').and_then(|end| {
+                    super::parse_iso_timestamp(&line[start..start + end])
+                })
+            }) {
+                if ts < rms {
+                    continue;
+                }
+            }
+        }
         process_assistant_line(&line, &tree, messages);
     }
     Ok(if from_byte > 0 { from_byte } else { 0 })
 }
 
-/// 尾部读取：mmap + memmem SIMD 前向扫描 + 分块并行解析
-/// Phase 1: memmem 前向 SIMD 扫描定位所有 assistant 行
-///   - 有 range_start_ms 时，先从估算位置扫描，不够再扩展到文件开头
-///   - 无 range_start_ms (--all) 时，扫描整个文件
-/// Phase 2: 从末尾向前分块并行解析，支持 range_start_ms 提前终止
-/// 返回实际读取的起始字节偏移（first_byte_offset）
+/// 大文件读取：mmap + 二分查找 + 倒序分行 + SIMD 行首关键字 + 并行 JSON 解析
+/// 流程：
+/// 1. mmap 映射文件
+/// 2. 二分查找确定下界 bs_offset
+/// 3. 在 [bs_offset, end) 范围内用 memchr 一次扫描找所有换行符位置（分行）
+/// 4. 倒序遍历行，仅检查每行前200字节用 memmem(SIMD) 查 assistant 关键字
+/// 5. 收集匹配行文本，用 rayon 并行解析 JSON，最后合并结果
 fn parse_file_tail_mmap(
     path: &Path,
     messages: &mut HashMap<String, MsgEntry>,
-    skip_ranges: &[(usize, usize)],
+    _skip_ranges: &[(usize, usize)],
     range_start_ms: Option<i64>,
+    use_rayon: bool,
 ) -> Result<u64> {
+    let t0 = std::time::Instant::now();
     let file = std::fs::File::open(path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
         return Ok(0);
     }
+    let is_large = file_size > 10 * 1024 * 1024;
 
-    // 尝试 mmap，失败则回退到 BufReader
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(m) => m,
-        Err(_) => return parse_file_tail_bufread(path, messages, file_size),
+        Err(_) => return parse_file_sequential(path, 0, messages, 0, range_start_ms),
     };
     let data: &[u8] = &mmap;
-
-    // Phase 1 是前向顺序扫描，用 SEQUENTIAL 让 OS 做激进预读
-    #[cfg(unix)]
-    {
-        let addr = mmap.as_ptr() as *mut libc::c_void;
-        unsafe { libc::madvise(addr, mmap.len(), libc::POSIX_MADV_SEQUENTIAL); }
+    if is_large {
+        eprintln!("[PERF]       mmap_open: {:.1}ms ({:.1}MB)", t0.elapsed().as_secs_f64() * 1000.0, file_size as f64 / 1e6);
     }
 
-    let pattern1: &[u8] = b"\"type\":\"assistant\"";
-    let pattern2: &[u8] = b"\"type\": \"assistant\"";
-
-    let finder1 = memchr::memmem::Finder::new(pattern1);
-    let finder2 = memchr::memmem::Finder::new(pattern2);
-
-    // memmem 前向扫描辅助闭包：从指定位置扫描到文件末尾
-    // 交替使用两个 Finder 合并两种 pattern 的结果，单次扫描
-    let scan_forward = |scan_start: usize, scan_end: usize| -> Vec<(usize, usize)> {
-        if scan_start >= scan_end {
-            return Vec::new();
-        }
-        let scan_data = &data[scan_start..scan_end];
-        let mut results: Vec<(usize, usize)> = Vec::new();
-        let mut pos1: Option<usize> = finder1.find(scan_data);
-        let mut pos2: Option<usize> = finder2.find(scan_data);
-        loop {
-            let next = match (pos1, pos2) {
-                (Some(p1), Some(p2)) if p1 <= p2 => Some(p1),
-                (Some(_), Some(p2)) => Some(p2),
-                (Some(p1), None) => Some(p1),
-                (None, Some(p2)) => Some(p2),
-                (None, None) => None,
-            };
-            let p = match next {
-                Some(p) => p,
-                None => break,
-            };
-            let abs_p = scan_start + p;
-            let line_start = match memchr::memrchr(b'\n', &data[..abs_p]) {
-                Some(i) => i + 1,
-                None => 0,
-            };
-            let line_end = match memchr::memchr(b'\n', &data[abs_p..]) {
-                Some(i) => abs_p + i,
-                None => data.len(),
-            };
-            if !results.last().is_some_and(|l| l.0 == line_start) {
-                results.push((line_start, line_end));
+    // 二分查找确定下界
+    let bs_offset: usize = if let Some(rms) = range_start_ms {
+        if file_size > 64 * 1024 * 1024 {
+            let t_bs = std::time::Instant::now();
+            let offset = find_range_start_offset_fn(data, rms);
+            if is_large {
+                eprintln!("[PERF]       binary_search: {:.1}ms, skip to {:.1}MB ({:.0}% of {:.0}MB)",
+                    t_bs.elapsed().as_secs_f64() * 1000.0,
+                    offset as f64 / 1e6, offset as f64 / file_size as f64 * 100.0, file_size as f64 / 1e6);
             }
-            if pos1 == Some(p) {
-                pos1 = finder1.find(&scan_data[p + 1..]).map(|x| p + 1 + x);
-            }
-            if pos2 == Some(p) {
-                pos2 = finder2.find(&scan_data[p + 1..]).map(|x| p + 1 + x);
-            }
-        }
-        results
-    };
-
-    // Phase 1: 前向 memmem 扫描
-    // 有 range_start_ms 时，先从估算位置扫描尾部，若不够再扩展
-    let assistant_lines = if range_start_ms.is_some() && file_size > 256 * 1024 * 1024 {
-        let initial_start = (file_size as usize * 6 / 10).min(file_size as usize - 1);
-        let mut lines = scan_forward(initial_start, data.len());
-        // 如果找到的最早行仍在 range 内，说明需要扩展到更前面的位置
-        if !lines.is_empty() {
-            let first_line = &data[lines[0].0..lines[0].1];
-            if extract_line_timestamp_ms(first_line).is_some_and(|ts| ts >= range_start_ms.unwrap()) {
-                // 扩展扫描范围到文件开头
-                let extended = scan_forward(0, initial_start + 1);
-                // 合并
-                let mut merged = extended;
-                merged.extend(lines.drain(..));
-                merged
-            } else {
-                lines
-            }
+            offset
         } else {
-            // 尾部没找到，扫描整个文件
-            scan_forward(0, data.len())
+            0
         }
-    } else {
-        scan_forward(0, data.len())
-    };
-
-    if assistant_lines.is_empty() {
-        return Ok(0);
-    }
-
-    // Phase 2: 从末尾向前分块并行解析，支持 range_start_ms 提前终止
-    const CHUNK_SIZE: usize = 2000;
-    let mut earliest_byte = data.len();
-    let mut idx = assistant_lines.len();
-
-    while idx > 0 {
-        let chunk_start = idx.saturating_sub(CHUNK_SIZE);
-        let chunk_lines = &assistant_lines[chunk_start..idx];
-        idx = chunk_start;
-
-        let mut all_before_range = true;
-        let mut chunk = Vec::with_capacity(chunk_lines.len());
-
-        for &(line_start, line_end) in chunk_lines {
-            if is_in_processed_range((line_start, line_end), skip_ranges) {
-                continue;
-            }
-            let line_bytes = &data[line_start..line_end];
-            // 检查时间戳：如果此行晚于 range_start_ms，标记本 chunk 不全是旧数据
-            if all_before_range && range_start_ms.is_some() {
-                if extract_line_timestamp_ms(line_bytes).is_none_or(|ts| ts >= range_start_ms.unwrap()) {
-                    all_before_range = false;
-                }
-            }
-            chunk.push(LineRef {
-                start: line_start,
-                end: line_end,
-            });
-            earliest_byte = earliest_byte.min(line_start);
-        }
-
-        // 如果本 chunk 全部早于 range_start_ms 且已有数据，停止
-        if all_before_range && range_start_ms.is_some() && !chunk.is_empty() {
-            break;
-        }
-
-        if chunk.is_empty() {
-            continue;
-        }
-
-        // 反转为时间正序
-        chunk.reverse();
-        let result = process_lines_parallel(data, chunk);
-        merge_msg_entries(messages, result.messages);
-    }
-
-    Ok(if earliest_byte < data.len() {
-        earliest_byte as u64
     } else {
         0
-    })
+    };
+
+    // 分行：用 memchr 一次扫描找所有换行符位置
+    let t_lines = std::time::Instant::now();
+    let nl_positions: Vec<usize> = memchr::memchr_iter(b'\n', &data[bs_offset..])
+        .map(|p| bs_offset + p)
+        .collect();
+
+    // 构建行范围列表 (start, end)
+    let mut line_ranges: Vec<(usize, usize)> = Vec::with_capacity(nl_positions.len() + 1);
+    let mut prev = bs_offset;
+    for &nl in &nl_positions {
+        if nl > prev {
+            line_ranges.push((prev, nl));
+        }
+        prev = nl + 1;
+    }
+    if prev < data.len() {
+        line_ranges.push((prev, data.len()));
+    }
+
+    if is_large {
+        eprintln!("[PERF]       split_lines: {:.1}ms ({} lines in {}MB range)",
+            t_lines.elapsed().as_secs_f64() * 1000.0,
+            line_ranges.len(), (data.len() - bs_offset) as f64 / 1e6);
+    }
+
+    // SIMD 关键字查找：对每行用 memmem 查 assistant 关键字
+    let mfinder1 = memchr::memmem::Finder::new(b"\"type\":\"assistant\"");
+    let mfinder2 = memchr::memmem::Finder::new(b"\"type\": \"assistant\"");
+
+    let t_filter = std::time::Instant::now();
+    let mut matched_texts: Vec<&str> = Vec::new();
+    for &(start, end) in line_ranges.iter().rev() {
+        let line_bytes = &data[start..end];
+        if mfinder1.find(line_bytes).is_none() && mfinder2.find(line_bytes).is_none() {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(line_bytes) {
+            matched_texts.push(s.trim());
+        }
+    }
+
+    if is_large {
+        eprintln!("[PERF]       simd_filter: {:.1}ms ({} matched / {} total lines)",
+            t_filter.elapsed().as_secs_f64() * 1000.0,
+            matched_texts.len(), line_ranges.len());
+    }
+
+    // JSON 解析：主文件用 rayon 并行，subagent 用串行（避免 rayon 线程池争抢）
+    let tree = build_pointer_tree();
+    let t_parse = std::time::Instant::now();
+
+    let local_maps: Vec<HashMap<String, MsgEntry>> = if use_rayon {
+        use rayon::prelude::*;
+        matched_texts
+            .par_iter()
+            .filter_map(|line| {
+                let mut msgs = HashMap::new();
+                process_assistant_line(line, &tree, &mut msgs);
+                if msgs.is_empty() { None } else { Some(msgs) }
+            })
+            .collect()
+    } else {
+        matched_texts
+            .iter()
+            .filter_map(|line| {
+                let mut msgs = HashMap::new();
+                process_assistant_line(line, &tree, &mut msgs);
+                if msgs.is_empty() { None } else { Some(msgs) }
+            })
+            .collect()
+    };
+
+    if is_large {
+        eprintln!("[PERF]       parallel_parse: {:.1}ms", t_parse.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    // 合并结果
+    for local in local_maps {
+        merge_msg_entries(messages, local);
+    }
+
+    drop(mmap);
+
+    if is_large {
+        eprintln!("[PERF]       total: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    Ok(bs_offset as u64)
 }
 
-/// 检查行范围是否落在已处理范围内
-fn is_in_processed_range(line: (usize, usize), ranges: &[(usize, usize)]) -> bool {
-    ranges.iter().any(|&(s, e)| line.0 >= s && line.1 <= e)
-}
-
-/// 从后往前收集 assistant 行引用
 /// 合并解析结果到主 HashMap
 fn merge_msg_entries(
     messages: &mut HashMap<String, MsgEntry>,
@@ -641,64 +657,7 @@ fn merge_msg_entries(
     }
 }
 
-/// Phase 2：rayon 并行解析
-fn process_lines_parallel(
-    data: &[u8],
-    line_refs: Vec<LineRef>,
-) -> ParallelResult {
-    let tree = build_pointer_tree();
-    let mut messages = HashMap::new();
-    for lr in &line_refs {
-        let line_bytes = &data[lr.start..lr.end];
-        let line = match std::str::from_utf8(line_bytes) {
-            Ok(s) => s.trim(),
-            Err(_) => continue,
-        };
-        let nodes = match get_many(line, &tree) {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        process_line_nodes(&nodes, &mut messages);
-    }
-    ParallelResult { messages }
-}
-
 /// BufReader 回退方案（mmap 失败时使用）
-fn parse_file_tail_bufread(
-    path: &Path,
-    messages: &mut HashMap<String, MsgEntry>,
-    file_size: u64,
-) -> Result<u64> {
-    const MAX_TAIL_SCAN: u64 = 64 * 1024 * 1024; // 64MB
-    let tree = build_pointer_tree();
-    let scan_size = MAX_TAIL_SCAN.min(file_size);
-    let seek_pos = file_size.saturating_sub(scan_size);
-    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
-    reader.seek(SeekFrom::Start(seek_pos))?;
-    let mut is_first_line = seek_pos > 0;
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if is_first_line {
-            is_first_line = false;
-            continue;
-        }
-        if !is_assistant_line(&line) {
-            continue;
-        }
-        process_assistant_line(&line, &tree, messages);
-    }
-
-    // 如果扫描了部分文件，还需读取前面部分
-    if seek_pos > 0 {
-        let _fbo = parse_file_sequential(path, 0, messages, seek_pos)?;
-    }
-    Ok(0)
-}
-
 /// 构建 PointerTree：6 个路径
 fn build_pointer_tree() -> PointerTree {
     let mut tree = PointerTree::new();
@@ -829,10 +788,7 @@ fn parse_subagent_messages_parallel(
             continue;
         }
         if let Some((mms, fs)) = super::cache::file_meta(&path) {
-            // 跳过修改时间早于 range_start_ms 的文件（无需解析旧数据）
-            if range_start_ms.is_some_and(|rs| mms > 0 && mms < rs) {
-                continue;
-            }
+            // 始终记录文件状态（用于增量解析判断）
             subagent_state.insert(
                 name.to_string(),
                 SubagentFileState {
@@ -840,20 +796,30 @@ fn parse_subagent_messages_parallel(
                     file_size: fs,
                 },
             );
+            // 跳过修改时间早于 range_start_ms 的文件（追加写入文件，最后修改时间=最新数据时间）
+            if range_start_ms.is_some_and(|rs| mms > 0 && mms < rs) {
+                continue;
+            }
         }
         files.push((name.to_string(), path));
     }
 
-    // 并行解析所有 subagent 文件
-    use rayon::prelude::*;
-    let results: Vec<HashMap<String, MsgEntry>> = files
-        .par_iter()
-        .map(|(_, path)| {
-            let mut msgs = HashMap::new();
-            let _ = parse_file_into_messages(path, 0, &mut msgs, &[], None);
-            msgs
-        })
-        .collect();
+    // 用独立 rayon 线程池并行解析 subagent 文件（避免与全局 rayon 池争抢）
+    let sub_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let results: Vec<HashMap<String, MsgEntry>> = sub_pool.install(|| {
+        use rayon::prelude::*;
+        files
+            .par_iter()
+            .map(|(_, path)| {
+                let mut msgs = HashMap::new();
+                let _ = parse_file_into_messages(path, 0, &mut msgs, &[], range_start_ms, true);
+                msgs
+            })
+            .collect()
+    });
 
     Ok((subagent_state, results))
 }
@@ -1074,7 +1040,7 @@ mod test_unknown_fields {
         }
 
         let mut seq_messages: HashMap<String, MsgEntry> = HashMap::new();
-        parse_file_sequential(path, 0, &mut seq_messages, 0).unwrap();
+        parse_file_sequential(path, 0, &mut seq_messages, 0, None).unwrap();
 
         let mut mmap_messages: HashMap<String, MsgEntry> = HashMap::new();
         parse_file_tail_mmap(path, &mut mmap_messages, &[], None).unwrap();
