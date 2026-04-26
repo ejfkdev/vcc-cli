@@ -121,6 +121,7 @@ pub(crate) fn extract_all_usage(
     // 阶段 2：提取 usage
     // 策略：session 间并行处理（2个一批），session 内 main→sub 串行
     // main 用全局 rayon，sub 用全局 SUB_POOL，避免线程池争抢
+    // 注意：并发度>2 会导致 I/O 和 rayon 嵌套竞争，性能反而退化
     let t1 = std::time::Instant::now();
 
     let results: Vec<ExtractResult> = filtered

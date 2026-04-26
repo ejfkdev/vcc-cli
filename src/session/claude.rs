@@ -10,10 +10,14 @@ use crate::session::cache::SubagentFileState;
 use crate::session::model::{self, SessionMeta, TokenUsage, UsageSummary};
 
 /// 全局 subagent rayon 线程池（避免每个 session 重复创建/销毁线程池）
-/// 6 线程：在 16 核机器上，全局 rayon 用 ~10 线程，sub_pool 用 6 线程
+/// 线程数约 = cores * 2 / 5（16核→6线程），避免与全局 rayon 池争抢 CPU
+/// 更多线程会导致嵌套 rayon 竞争退化
 static SUB_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
     rayon::ThreadPoolBuilder::new()
-        .num_threads(6)
+        .num_threads((cores * 2 / 5).max(4))
         .build()
         .unwrap()
 });
@@ -34,10 +38,11 @@ fn extract_line_timestamp_ms(line: &[u8]) -> Option<i64> {
 fn find_range_start_offset_fn(data: &[u8], target_ms: i64) -> usize {
     let mut lo: usize = 0;
     let mut hi: usize = data.len();
-    for _ in 0..20 {
+    for _ in 0..30 {
+        if hi - lo < 1_000_000 { break; } // 搜索范围 < 1MB 时停止
         let mid = lo + (hi - lo) / 2;
         let sample_start = mid.saturating_sub(100);
-        let sample_end = (mid + 1_000_000).min(data.len());
+        let sample_end = (mid + 2_000_000).min(data.len());
         let sample = &data[sample_start..sample_end];
         let first_nl = match memchr::memchr(b'\n', sample) {
             Some(nl) => nl + 1,
@@ -45,7 +50,7 @@ fn find_range_start_offset_fn(data: &[u8], target_ms: i64) -> usize {
         };
         let mut found_ts: Option<i64> = None;
         let mut pos = first_nl;
-        for _ in 0..50 {
+        for _ in 0..100 {
             let nl = match memchr::memchr(b'\n', &sample[pos..]) {
                 Some(nl) => pos + nl,
                 None => break,
