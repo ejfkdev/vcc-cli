@@ -120,7 +120,7 @@ pub(crate) fn extract_all_usage(
 
     // 阶段 2：提取 usage
     // 策略：session 间并行处理（2个一批），session 内 main→sub 串行
-    // main 用全局 rayon，sub 用独立 sub_pool，避免线程池争抢
+    // main 用全局 rayon，sub 用全局 SUB_POOL，避免线程池争抢
     let t1 = std::time::Instant::now();
 
     let results: Vec<ExtractResult> = filtered
@@ -152,7 +152,11 @@ pub(crate) fn extract_all_usage(
         }
         summaries.extend(r.usages);
     }
-    cache.purge_missing();
+    // purge_missing 每次调用都对所有缓存路径做 stat()，太慢
+    // 只在有实际更新时才执行
+    if cache_dirty {
+        cache.purge_missing();
+    }
     if cache_dirty {
         if let Err(e) = cache.save() {
             eprintln!("warning: failed to save cache: {}", e);

@@ -3,10 +3,20 @@ use sonic_rs::{get_many, pointer, JsonValueTrait, PointerTree};
 use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::adapter::mapping::ToolMapping;
 use crate::session::cache::SubagentFileState;
 use crate::session::model::{self, SessionMeta, TokenUsage, UsageSummary};
+
+/// 全局 subagent rayon 线程池（避免每个 session 重复创建/销毁线程池）
+/// 6 线程：在 16 核机器上，全局 rayon 用 ~10 线程，sub_pool 用 6 线程
+static SUB_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(6)
+        .build()
+        .unwrap()
+});
 
 /// 从 JSONL 行字节中快速提取时间戳（毫秒），用于 range_start_ms 提前终止判断
 /// 使用 memmem SIMD 加速搜索 `"timestamp":"` 模式
@@ -345,7 +355,7 @@ pub(crate) fn extract_usage(
         subagent_files,
     };
 
-    if file_size > 10 * 1024 * 1024 {
+    if file_size > 500 * 1024 * 1024 {
         let wall = t0.elapsed().as_secs_f64() * 1000.0;
         eprintln!("[PERF]     {} wall={:.0}ms(main={:.0}ms,sub={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
             session.source_path.file_name().unwrap_or_default().to_string_lossy(),
@@ -518,7 +528,7 @@ fn parse_file_tail_mmap(
     if file_size == 0 {
         return Ok(0);
     }
-    let is_large = file_size > 10 * 1024 * 1024;
+    let is_large = file_size > 500 * 1024 * 1024;
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(m) => m,
@@ -594,38 +604,33 @@ fn parse_file_tail_mmap(
             matched_texts.len(), line_ranges.len());
     }
 
-    // JSON 解析：主文件用 rayon 并行，subagent 用串行（避免 rayon 线程池争抢）
+    // JSON 解析
     let tree = build_pointer_tree();
     let t_parse = std::time::Instant::now();
 
     let local_maps: Vec<HashMap<String, MsgEntry>> = if use_rayon {
         use rayon::prelude::*;
-        matched_texts
-            .par_iter()
-            .filter_map(|line| {
-                let mut msgs = HashMap::new();
-                process_assistant_line(line, &tree, &mut msgs);
-                if msgs.is_empty() { None } else { Some(msgs) }
-            })
-            .collect()
+        matched_texts.par_iter().filter_map(|line| {
+            let mut msgs = HashMap::new();
+            process_assistant_line(line, &tree, &mut msgs);
+            if msgs.is_empty() { None } else { Some(msgs) }
+        }).collect()
     } else {
-        matched_texts
-            .iter()
-            .filter_map(|line| {
-                let mut msgs = HashMap::new();
-                process_assistant_line(line, &tree, &mut msgs);
-                if msgs.is_empty() { None } else { Some(msgs) }
-            })
-            .collect()
+        matched_texts.iter().filter_map(|line| {
+            let mut msgs = HashMap::new();
+            process_assistant_line(line, &tree, &mut msgs);
+            if msgs.is_empty() { None } else { Some(msgs) }
+        }).collect()
     };
+    // merge with pre-allocation
+    if messages.is_empty() && !local_maps.is_empty() {
+        let total_entries: usize = local_maps.iter().map(|m| m.len()).sum();
+        messages.reserve(total_entries);
+    }
+    for local in local_maps { merge_msg_entries(messages, local); }
 
     if is_large {
         eprintln!("[PERF]       parallel_parse: {:.1}ms", t_parse.elapsed().as_secs_f64() * 1000.0);
-    }
-
-    // 合并结果
-    for local in local_maps {
-        merge_msg_entries(messages, local);
     }
 
     drop(mmap);
@@ -657,7 +662,6 @@ fn merge_msg_entries(
     }
 }
 
-/// BufReader 回退方案（mmap 失败时使用）
 /// 构建 PointerTree：6 个路径
 fn build_pointer_tree() -> PointerTree {
     let mut tree = PointerTree::new();
@@ -690,22 +694,21 @@ fn process_line_nodes(
     messages: &mut HashMap<String, MsgEntry>,
 ) {
     // [0] message.id
-    let id = match nodes.first().and_then(|n| n.as_ref()) {
+    let id_str = match nodes.first().and_then(|n| n.as_ref()) {
         Some(v) => match v.as_str() {
-            Some(s) => s.to_string(),
+            Some(s) => s,
             None => return,
         },
         None => return,
     };
-    // [1] message.model
-    let model = nodes
+    // [1] message.model（先检查 synthetic，避免不必要的 String 分配）
+    let model_str = nodes
         .get(1)
         .and_then(|n| n.as_ref())
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "claude-sonnet-4".to_string());
+        .unwrap_or("claude-sonnet-4");
     // 跳过 <synthetic> 模型
-    if model.starts_with('<') {
+    if model_str.starts_with('<') {
         return;
     }
     // [2] message.stop_reason — null 或 missing 视为无 stop
@@ -739,7 +742,7 @@ fn process_line_nodes(
     // 倒序路径：首次遇到即最大值 → 直接插入
     // 顺序路径：后出现的更大 → 需要替换旧值
     // 策略：总是插入/替换，但优先保留有 stop_reason 的条目
-    let should_insert = match messages.get(&id) {
+    let should_insert = match messages.get(id_str) {
         None => true,
         Some(old) => {
             // 已有 stop_reason 的不丢弃，除非新条目也有 stop 且 token 更大
@@ -754,9 +757,9 @@ fn process_line_nodes(
         return;
     }
     messages.insert(
-        id,
+        id_str.to_string(),
         MsgEntry {
-            model,
+            model: model_str.to_string(),
             usage: new_usage,
             has_stop,
             is_fast,
@@ -796,6 +799,10 @@ fn parse_subagent_messages_parallel(
                     file_size: fs,
                 },
             );
+            // 跳过空文件
+            if fs == 0 {
+                continue;
+            }
             // 跳过修改时间早于 range_start_ms 的文件（追加写入文件，最后修改时间=最新数据时间）
             if range_start_ms.is_some_and(|rs| mms > 0 && mms < rs) {
                 continue;
@@ -804,12 +811,8 @@ fn parse_subagent_messages_parallel(
         files.push((name.to_string(), path));
     }
 
-    // 用独立 rayon 线程池并行解析 subagent 文件（避免与全局 rayon 池争抢）
-    let sub_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .unwrap();
-    let results: Vec<HashMap<String, MsgEntry>> = sub_pool.install(|| {
+    // 用全局 subagent 线程池并行解析（避免与全局 rayon 池争抢，且避免重复创建线程池）
+    let results: Vec<HashMap<String, MsgEntry>> = SUB_POOL.install(|| {
         use rayon::prelude::*;
         files
             .par_iter()
@@ -831,12 +834,13 @@ fn summarize_messages(
     messages: &HashMap<String, MsgEntry>,
     last_active_at: Option<i64>,
 ) -> Result<Vec<UsageSummary>> {
-    // key = (model_key, date_string)
-    let (mut model_usages, mut model_counts, mut model_costs): (
-        HashMap<(String, String), TokenUsage>,
-        HashMap<(String, String), i64>,
-        HashMap<(String, String), f64>,
-    ) = (HashMap::new(), HashMap::new(), HashMap::new());
+    struct Agg {
+        usage: TokenUsage,
+        count: i64,
+        cost: f64,
+    }
+    // key = (model_key, date_string)，合并 usage/count/cost 到单一 HashMap
+    let mut agg: HashMap<(String, String), Agg> = HashMap::new();
     for msg in messages.values() {
         if !msg.has_stop || msg.usage.is_empty() {
             continue;
@@ -851,26 +855,28 @@ fn summarize_messages(
         } else {
             last_active_at.map(model::ms_to_date).unwrap_or_default()
         };
-        let key = (model_key, date);
-        *model_usages.entry(key.clone()).or_default() += msg.usage.clone();
-        *model_counts.entry(key.clone()).or_default() += 1;
+        let entry = agg.entry((model_key, date)).or_insert_with(|| Agg {
+            usage: TokenUsage::default(),
+            count: 0,
+            cost: 0.0,
+        });
+        entry.usage += msg.usage.clone();
+        entry.count += 1;
         if let Some(c) = msg.cost_usd {
-            *model_costs.entry(key).or_default() += c;
+            entry.cost += c;
         }
     }
-    Ok(model_usages
+    Ok(agg
         .into_iter()
-        .map(|((model, date), usage)| {
-            let req = model_counts.get(&(model.clone(), date.clone())).copied().unwrap_or(0);
-            let cost = model_costs.get(&(model.clone(), date.clone())).copied().map(round_cost_usd);
+        .map(|((model, date), a)| {
             let date_opt = if date.is_empty() { None } else { Some(date) };
             UsageSummary {
                 tool: tool.to_string(),
                 model,
-                usage,
-                request_count: req,
+                usage: a.usage,
+                request_count: a.count,
                 date: date_opt,
-                cost_usd: cost,
+                cost_usd: if a.cost > 0.0 { Some(round_cost_usd(a.cost)) } else { None },
             }
         })
         .collect())
