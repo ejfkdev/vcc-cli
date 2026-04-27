@@ -2145,7 +2145,6 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
- "libc",
  "md-5",
  "memchr",
  "memmap2",

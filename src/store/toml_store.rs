@@ -57,6 +57,7 @@ impl TomlStore {
     }
 
     pub fn default_root() -> Result<PathBuf> {
+        #[cfg(unix)]
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             if !xdg.is_empty() {
                 let path = PathBuf::from(&xdg);

@@ -1074,15 +1074,21 @@ fn scan_opencode_sessions(
     min_mtime_ms: Option<i64>,
 ) -> Result<Vec<SessionMeta>> {
     let session_dir = if mapping.session.path.as_deref() == Some("storage/session") {
+        #[cfg(unix)]
         let default_data = dirs::home_dir()
             .unwrap_or_default()
             .join(".local")
             .join("share");
+        #[cfg(not(unix))]
+        let default_data = dirs::data_dir().unwrap_or_default();
+        #[cfg(unix)]
         let dd = std::env::var("XDG_DATA_HOME")
             .ok()
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or(default_data);
+        #[cfg(not(unix))]
+        let dd = default_data;
         dd.join("opencode").join("storage").join("session")
     } else {
         config_dir.join(mapping.session.path.as_deref().unwrap_or("storage/session"))

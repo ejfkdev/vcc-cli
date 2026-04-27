@@ -353,6 +353,9 @@ fn insert_enabled_entry(
 fn atomic_write(path: &Path, content: &str, tmp_ext: &str) -> Result<()> {
     let tmp = path.with_extension(tmp_ext);
     std::fs::write(&tmp, content)?;
+    // Windows: rename 不覆盖已存在文件，需先删除目标
+    #[cfg(not(unix))]
+    let _ = std::fs::remove_file(path);
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

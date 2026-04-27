@@ -39,6 +39,9 @@ fn save_cache<T: JsonCache>(cache: &T) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o600));
     }
+    // Windows: rename 不覆盖已存在文件，需先删除目标
+    #[cfg(not(unix))]
+    let _ = std::fs::remove_file(&p);
     std::fs::rename(&t, &p)?;
     Ok(())
 }
