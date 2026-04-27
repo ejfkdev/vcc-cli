@@ -19,6 +19,10 @@ struct Args {
     #[arg(long, global = true)]
     json: bool,
 
+    /// 启用性能调试输出（[PERF] 日志）
+    #[arg(long, global = true, hide = true)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -214,6 +218,10 @@ async fn main() {
     // 解析全局 --json
     let json = matches.get_flag("json");
     cli::output::set_json_mode(json);
+
+    // 解析全局 --debug
+    let debug = matches.get_flag("debug");
+    cli::output::set_debug_mode(debug);
 
     // 解析子命令
     let sub = matches.subcommand();

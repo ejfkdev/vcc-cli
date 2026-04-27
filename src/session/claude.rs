@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crate::perf_log;
 use sonic_rs::{get_many, pointer, JsonValueTrait, PointerTree};
 use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
@@ -28,10 +29,39 @@ fn extract_line_timestamp_ms(line: &[u8]) -> Option<i64> {
     const NEEDLE: &[u8] = b"\"timestamp\":\"";
     let start = memchr::memmem::find(line, NEEDLE)?;
     let ts_start = start + NEEDLE.len();
-    // 找结束引号
     let ts_end = line[ts_start..].iter().position(|&b| b == b'"')?;
     let ts_str = std::str::from_utf8(&line[ts_start..ts_start + ts_end]).ok()?;
     super::parse_iso_timestamp(ts_str)
+}
+
+/// 读文件尾部 64KB，提取最后一行时间戳，判断文件是否完全在 range_start_ms 之前
+/// JSONL 时间有序，最后一行 = 最晚时间。用于精确跳过旧 subagent 文件
+/// 64KB 足够覆盖极端情况（连续多行 > 8KB 的大行），I/O 开销可忽略
+fn file_last_ts_before_range(path: &Path, range_start_ms: i64) -> Option<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let file_size = std::fs::metadata(path).ok()?.len();
+    if file_size == 0 {
+        return Some(true);
+    }
+    let tail_offset = file_size.saturating_sub(65536);
+    let tail_size = (file_size - tail_offset) as usize;
+    let mut buf = vec![0u8; tail_size];
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(tail_offset)).ok()?;
+    f.read_exact(&mut buf).ok()?;
+    // 从尾部反向扫描行，找最后一个有 timestamp 的行
+    let nl_pos: Vec<usize> = memchr::memchr_iter(b'\n', &buf).collect();
+    for i in (0..=nl_pos.len()).rev() {
+        let start = if i == 0 { 0 } else { nl_pos[i - 1] + 1 };
+        let end = if i < nl_pos.len() { nl_pos[i] } else { buf.len() };
+        if start >= end {
+            continue;
+        }
+        if let Some(ts) = extract_line_timestamp_ms(&buf[start..end]) {
+            return Some(ts < range_start_ms);
+        }
+    }
+    None
 }
 
 /// 二分查找：在 data 中找时间戳 >= target_ms 的最小行偏移
@@ -85,6 +115,8 @@ struct MsgEntry {
     /// 消息时间戳（毫秒），用于 --by day 按天聚合
     timestamp_ms: i64,
 }
+
+type MsgMap = HashMap<String, MsgEntry>;
 
 /// 四舍五入 costUSD 到 8 位小数避免浮点漂移
 fn round_cost_usd(v: f64) -> f64 {
@@ -340,7 +372,7 @@ pub(crate) fn extract_usage(
     let file_size = session.file_size;
 
     // 先解析 main（独占全局 rayon），再解析 subagent（独立线程池）
-    let mut messages: HashMap<String, MsgEntry> = HashMap::new();
+    let mut messages: MsgMap = HashMap::new();
     let fbo = parse_file_into_messages(&session.source_path, 0, &mut messages, &[], range_start_ms, true)?;
     let main_elapsed = t0.elapsed().as_secs_f64() * 1000.0;
 
@@ -362,7 +394,7 @@ pub(crate) fn extract_usage(
 
     if file_size > 500 * 1024 * 1024 {
         let wall = t0.elapsed().as_secs_f64() * 1000.0;
-        eprintln!("[PERF]     {} wall={:.0}ms(main={:.0}ms,sub={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
+        perf_log!("[PERF]     {} wall={:.0}ms(main={:.0}ms,sub={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
             session.source_path.file_name().unwrap_or_default().to_string_lossy(),
             wall, main_elapsed, sub_elapsed,
             (t3-t2).as_secs_f64()*1000.0, (std::time::Instant::now()-t3).as_secs_f64()*1000.0,
@@ -375,7 +407,7 @@ pub(crate) fn extract_usage_incremental(
     session: &SessionMeta,
     from_byte: u64,
 ) -> Result<Vec<UsageSummary>> {
-    let mut messages: HashMap<String, MsgEntry> = HashMap::new();
+    let mut messages: MsgMap = HashMap::new();
     // 只读主文件新增字节（增量路径不需要 range_start_ms 过滤）
     let _ = parse_file_into_messages(&session.source_path, from_byte, &mut messages, &[], None, true)?;
     summarize_messages(&session.tool, &messages, session.last_active_at)
@@ -437,38 +469,61 @@ pub(crate) fn extract_subagent_incremental(
 fn parse_file_into_messages(
     path: &Path,
     from_byte: u64,
-    messages: &mut HashMap<String, MsgEntry>,
+    messages: &mut MsgMap,
     skip_ranges: &[(usize, usize)],
     range_start_ms: Option<i64>,
     use_rayon: bool,
 ) -> Result<u64> {
     let file = std::fs::File::open(path)?;
     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let tag = short_file_tag(path);
 
     // 增量读取
     if from_byte > 0 {
         return parse_file_sequential(path, from_byte, messages, 0, None);
     }
 
+    perf_log!("[PERF] {} read {:.1}MB", tag, file_size as f64 / 1e6);
+
     // 大文件：mmap 二分查找 + memchr 分行 + memmem 过滤 + JSON 解析
     // 阈值：有 range_start_ms 时降到 1MB（利用 binary search 跳过旧数据），否则 64MB
     let mmap_threshold = if range_start_ms.is_some() { 1024 * 1024 } else { 64 * 1024 * 1024 };
     if file_size > mmap_threshold {
-        return parse_file_tail_mmap(path, messages, skip_ranges, range_start_ms, use_rayon);
+        return parse_file_tail_mmap(path, messages, skip_ranges, range_start_ms, use_rayon, &tag);
     }
 
     // 小文件：全量顺序读取
     parse_file_sequential(path, 0, messages, 0, range_start_ms)
 }
 
-/// 顺序读取（全量/增量）
-/// 读取 [from_byte, end_byte) 范围，end_byte=0 表示读到文件末尾
+/// 从文件路径生成短标签用于 PERF 日志，如 "d09ec20e" 或 "sub/a1b2c3d4"
+fn short_file_tag(path: &Path) -> String {
+    let fname = path.file_name().unwrap_or_default().to_string_lossy();
+    // 主 session 文件：取 UUID 前 8 字符，如 "d09ec20e"
+    if fname.ends_with(".jsonl") && !fname.starts_with("agent-") {
+        let stem = fname.trim_end_matches(".jsonl");
+        return stem.chars().take(8).collect::<String>();
+    }
+    // subagent 文件：提取 UUID 部分（格式 agent-{type}-{uuid}.jsonl）
+    if fname.starts_with("agent-") {
+        let stem = fname.trim_end_matches(".jsonl");
+        // 找最后一个 '-' 后的部分作为短 ID
+        if let Some(short_id) = stem.rsplit('-').next() {
+            let id: String = short_id.chars().take(8).collect();
+            return format!("sub/{}", id);
+        }
+        return format!("sub/{}", stem.chars().take(8).collect::<String>());
+    }
+    // 其他：取文件名前 12 字符
+    fname.chars().take(12).collect::<String>()
+}
+
 /// 顺序读取（全量/增量）
 /// 读取 [from_byte, end_byte) 范围，end_byte=0 表示读到文件末尾
 fn parse_file_sequential(
     path: &Path,
     from_byte: u64,
-    messages: &mut HashMap<String, MsgEntry>,
+    messages: &mut MsgMap,
     end_byte: u64,
     range_start_ms: Option<i64>,
 ) -> Result<u64> {
@@ -479,20 +534,27 @@ fn parse_file_sequential(
     let tree = build_pointer_tree();
     let mut skip_first = from_byte > 0;
     let mut bytes_read: u64 = from_byte;
-    for line in reader.lines() {
-        let line = line?;
+    let mut line_buf = String::new();
+    loop {
+        line_buf.clear();
+        match reader.read_line(&mut line_buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
         if skip_first {
             skip_first = false;
             continue;
         }
         // 字节范围限制：end_byte > 0 时，读到超过 end_byte 就停
         if end_byte > 0 {
-            bytes_read += line.len() as u64 + 1; // +1 for newline
+            bytes_read += line_buf.len() as u64;
             if bytes_read > end_byte {
                 break;
             }
         }
-        if !is_assistant_line(&line) {
+        let line = line_buf.trim();
+        if !is_assistant_line(line) {
             continue;
         }
         // 时间戳过滤：跳过早于 range_start_ms 的行
@@ -508,7 +570,7 @@ fn parse_file_sequential(
                 }
             }
         }
-        if let Some((id, entry)) = process_assistant_line(&line, &tree) {
+        if let Some((id, entry)) = process_assistant_line(line, &tree) {
             let should_insert = match messages.get(&id) {
                 None => true,
                 Some(old) => {
@@ -534,10 +596,11 @@ fn parse_file_sequential(
 /// 5. 收集匹配行文本，用 rayon 并行解析 JSON，最后合并结果
 fn parse_file_tail_mmap(
     path: &Path,
-    messages: &mut HashMap<String, MsgEntry>,
+    messages: &mut MsgMap,
     _skip_ranges: &[(usize, usize)],
     range_start_ms: Option<i64>,
     use_rayon: bool,
+    tag: &str,
 ) -> Result<u64> {
     let t0 = std::time::Instant::now();
     let file = std::fs::File::open(path)?;
@@ -553,17 +616,19 @@ fn parse_file_tail_mmap(
     };
     let data: &[u8] = &mmap;
     if is_large {
-        eprintln!("[PERF]       mmap_open: {:.1}ms ({:.1}MB)", t0.elapsed().as_secs_f64() * 1000.0, file_size as f64 / 1e6);
+        perf_log!("[PERF] {}   mmap_open: {:.1}ms ({:.1}MB)", tag, t0.elapsed().as_secs_f64() * 1000.0, file_size as f64 / 1e6);
     }
 
     // 二分查找确定下界
+    // 仅对 > 64MB 的大文件做 binary_search
+    // subagent 文件较小且 assistant 行稀疏，binary_search 精度不够
     let bs_offset: usize = if let Some(rms) = range_start_ms {
         if file_size > 64 * 1024 * 1024 {
             let t_bs = std::time::Instant::now();
             let offset = find_range_start_offset_fn(data, rms);
             if is_large {
-                eprintln!("[PERF]       binary_search: {:.1}ms, skip to {:.1}MB ({:.0}% of {:.0}MB)",
-                    t_bs.elapsed().as_secs_f64() * 1000.0,
+                perf_log!("[PERF] {}   binary_search: {:.1}ms, skip to {:.1}MB ({:.0}% of {:.0}MB)",
+                    tag, t_bs.elapsed().as_secs_f64() * 1000.0,
                     offset as f64 / 1e6, offset as f64 / file_size as f64 * 100.0, file_size as f64 / 1e6);
             }
             offset
@@ -590,8 +655,8 @@ fn parse_file_tail_mmap(
     }
 
     if is_large {
-        eprintln!("[PERF]       split_lines: {:.1}ms ({} lines in {}MB range)",
-            t_lines.elapsed().as_secs_f64() * 1000.0,
+        perf_log!("[PERF] {}   split_lines: {:.1}ms ({} lines in {}MB range)",
+            tag, t_lines.elapsed().as_secs_f64() * 1000.0,
             line_ranges.len(), (data.len() - bs_offset) as f64 / 1e6);
     }
 
@@ -612,8 +677,8 @@ fn parse_file_tail_mmap(
     }
 
     if is_large {
-        eprintln!("[PERF]       simd_filter: {:.1}ms ({} matched / {} total lines)",
-            t_filter.elapsed().as_secs_f64() * 1000.0,
+        perf_log!("[PERF] {}   simd_filter: {:.1}ms ({} matched / {} total lines)",
+            tag, t_filter.elapsed().as_secs_f64() * 1000.0,
             matched_texts.len(), line_ranges.len());
     }
 
@@ -638,13 +703,13 @@ fn parse_file_tail_mmap(
     merge_pairs(messages, pairs);
 
     if is_large {
-        eprintln!("[PERF]       parallel_parse: {:.1}ms", t_parse.elapsed().as_secs_f64() * 1000.0);
+        perf_log!("[PERF] {}   parallel_parse: {:.1}ms", tag, t_parse.elapsed().as_secs_f64() * 1000.0);
     }
 
     drop(mmap);
 
     if is_large {
-        eprintln!("[PERF]       total: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+        perf_log!("[PERF] {}   total: {:.1}ms", tag, t0.elapsed().as_secs_f64() * 1000.0);
     }
 
     Ok(bs_offset as u64)
@@ -652,7 +717,7 @@ fn parse_file_tail_mmap(
 
 /// 合并 (id, MsgEntry) 对到主 HashMap
 fn merge_pairs(
-    messages: &mut HashMap<String, MsgEntry>,
+    messages: &mut MsgMap,
     pairs: Vec<(String, MsgEntry)>,
 ) {
     for (id, entry) in pairs {
@@ -670,10 +735,71 @@ fn merge_pairs(
     }
 }
 
+/// 从内存字节缓冲区解析 assistant messages
+/// 用于 subagent 预读后的纯 CPU 解析，跳过文件 I/O 和 BufReader 开销
+/// 使用 memchr 分行 + memmem SIMD 过滤 + 行级时间戳跳过
+fn parse_bytes_into_messages(
+    data: &[u8],
+    messages: &mut MsgMap,
+    range_start_ms: Option<i64>,
+) {
+    if data.is_empty() {
+        return;
+    }
+    let tree = build_pointer_tree();
+    let mfinder1 = memchr::memmem::Finder::new(b"\"type\":\"assistant\"");
+    let mfinder2 = memchr::memmem::Finder::new(b"\"type\": \"assistant\"");
+    let mut pos = 0;
+    while pos < data.len() {
+        let remaining = &data[pos..];
+        let line_end = match memchr::memchr(b'\n', remaining) {
+            Some(nl) => pos + nl,
+            None => data.len(),
+        };
+        let line = &data[pos..line_end];
+        pos = line_end + 1;
+
+        // 跳过短行
+        if line.len() < 20 {
+            continue;
+        }
+        // SIMD 关键字过滤
+        if mfinder1.find(line).is_none() && mfinder2.find(line).is_none() {
+            continue;
+        }
+        // 时间戳过滤
+        if let Some(rms) = range_start_ms {
+            if let Some(ts) = extract_line_timestamp_ms(line) {
+                if ts < rms {
+                    continue;
+                }
+            }
+        }
+        // JSON 解析
+        let line_str = match std::str::from_utf8(line) {
+            Ok(s) => s.trim(),
+            Err(_) => continue,
+        };
+        if let Some((id, entry)) = process_assistant_line(line_str, &tree) {
+            let should_insert = match messages.get(&id) {
+                None => true,
+                Some(old) => {
+                    (!old.has_stop && entry.has_stop)
+                        || (old.has_stop == entry.has_stop
+                            && entry.usage.output_tokens > old.usage.output_tokens)
+                }
+            };
+            if should_insert {
+                messages.insert(id, entry);
+            }
+        }
+    }
+}
+
 /// 合并解析结果到主 HashMap
 fn merge_msg_entries(
-    messages: &mut HashMap<String, MsgEntry>,
-    new_entries: HashMap<String, MsgEntry>,
+    messages: &mut MsgMap,
+    new_entries: MsgMap,
 ) {
     for (id, entry) in new_entries {
         let should_insert = match messages.get(&id) {
@@ -722,10 +848,7 @@ fn process_line_nodes(
 ) -> Option<(String, MsgEntry)> {
     // [0] message.id
     let id_str = match nodes.first().and_then(|n| n.as_ref()) {
-        Some(v) => match v.as_str() {
-            Some(s) => s,
-            None => return None,
-        },
+        Some(v) => v.as_str()?,
         None => return None,
     };
     // [1] message.model（先检查 synthetic，避免不必要的 String 分配）
@@ -779,18 +902,19 @@ fn process_line_nodes(
 }
 
 /// 解析主文件对应的 subagents/ 目录下所有 agent-*.jsonl
+/// 两阶段处理：Phase 1 顺序 I/O 预读（利用 OS 顺序读预取），Phase 2 并行解析（纯 CPU）
 /// 返回 (subagent_state, 各文件的解析结果)
 fn parse_subagent_messages_parallel(
     main_path: &Path,
     range_start_ms: Option<i64>,
-) -> Result<(HashMap<String, SubagentFileState>, Vec<HashMap<String, MsgEntry>>)> {
+) -> Result<(HashMap<String, SubagentFileState>, Vec<MsgMap>)> {
     let sub_dir = main_path.with_extension("").join("subagents");
     if !sub_dir.is_dir() {
         return Ok((HashMap::new(), Vec::new()));
     }
 
     // 收集需要处理的文件
-    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut subagent_state = HashMap::new();
     for entry in std::fs::read_dir(&sub_dir)? {
         let entry = entry?;
@@ -800,7 +924,6 @@ fn parse_subagent_messages_parallel(
             continue;
         }
         if let Some((mms, fs)) = super::cache::file_meta(&path) {
-            // 始终记录文件状态（用于增量解析判断）
             subagent_state.insert(
                 name.to_string(),
                 SubagentFileState {
@@ -808,39 +931,70 @@ fn parse_subagent_messages_parallel(
                     file_size: fs,
                 },
             );
-            // 跳过空文件
             if fs == 0 {
                 continue;
             }
-            // 跳过修改时间早于 range_start_ms 的文件（追加写入文件，最后修改时间=最新数据时间）
             if range_start_ms.is_some_and(|rs| mms > 0 && mms < rs) {
                 continue;
             }
         }
-        files.push((name.to_string(), path));
+        if let Some(rs) = range_start_ms {
+            if file_last_ts_before_range(&path, rs) == Some(true) {
+                continue;
+            }
+        }
+        files.push(path);
     }
 
-    // 用全局 subagent 线程池并行解析（避免与全局 rayon 池争抢，且避免重复创建线程池）
-    let results: Vec<HashMap<String, MsgEntry>> = SUB_POOL.install(|| {
+    if files.is_empty() {
+        return Ok((subagent_state, Vec::new()));
+    }
+
+    perf_log!("[PERF] subagents: {} files", files.len());
+
+    // Phase 1: 顺序 I/O 预读
+    // 小文件顺序读比多线程随机读快：OS 可预取，无 inode 锁竞争，无线程争抢
+    let t_io = std::time::Instant::now();
+    let file_data: Vec<Vec<u8>> = files
+        .into_iter()
+        .filter_map(|path| std::fs::read(&path).ok())
+        .filter(|d| !d.is_empty())
+        .collect();
+    let total_bytes: usize = file_data.iter().map(|d| d.len()).sum();
+    perf_log!(
+        "[PERF] subagents: read {} files ({:.1}MB) in {:.0}ms",
+        file_data.len(),
+        total_bytes as f64 / 1e6,
+        t_io.elapsed().as_secs_f64() * 1000.0
+    );
+
+    // Phase 2: 并行解析（纯 CPU，无 I/O 竞争）
+    let t_parse = std::time::Instant::now();
+    let results: Vec<MsgMap> = SUB_POOL.install(|| {
         use rayon::prelude::*;
-        files
+        file_data
             .par_iter()
-            .map(|(_, path)| {
+            .map(|data| {
                 let mut msgs = HashMap::new();
-                let _ = parse_file_into_messages(path, 0, &mut msgs, &[], range_start_ms, true);
+                parse_bytes_into_messages(data, &mut msgs, range_start_ms);
                 msgs
             })
             .collect()
     });
+    perf_log!(
+        "[PERF] subagents: parse {} files in {:.0}ms",
+        results.len(),
+        t_parse.elapsed().as_secs_f64() * 1000.0
+    );
 
     Ok((subagent_state, results))
 }
 
-/// 将 HashMap<String, MsgEntry> 汇总为 Vec<UsageSummary>
+/// 将 MsgMap 汇总为 Vec<UsageSummary>
 /// 按 (model, date) 聚合，支持 --by day 按天统计
 fn summarize_messages(
     tool: &str,
-    messages: &HashMap<String, MsgEntry>,
+    messages: &MsgMap,
     last_active_at: Option<i64>,
 ) -> Result<Vec<UsageSummary>> {
     struct Agg {
@@ -1054,11 +1208,11 @@ mod test_unknown_fields {
             return;
         }
 
-        let mut seq_messages: HashMap<String, MsgEntry> = HashMap::new();
+        let mut seq_messages: MsgMap = HashMap::new();
         parse_file_sequential(path, 0, &mut seq_messages, 0, None).unwrap();
 
-        let mut mmap_messages: HashMap<String, MsgEntry> = HashMap::new();
-        parse_file_tail_mmap(path, &mut mmap_messages, &[], None, true).unwrap();
+        let mut mmap_messages: MsgMap = HashMap::new();
+        parse_file_tail_mmap(path, &mut mmap_messages, &[], None, true, "test").unwrap();
 
         assert_eq!(mmap_messages.len(), seq_messages.len(), "mmap and sequential should find same number of entries");
     }

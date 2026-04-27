@@ -419,10 +419,10 @@ impl CachedUsageData {
 
     /// 检查已处理范围是否覆盖整个文件 [0, file_size]
     pub fn is_fully_processed(&self, file_size: u64) -> bool {
-        if file_size == 0 || self.processed_ranges.is_empty() {
+        if file_size == 0 {
             return false;
         }
-        let ranges = merge_ranges(self.processed_ranges.clone());
+        let ranges = self.effective_processed_ranges();
         ranges.len() == 1 && ranges[0].0 == 0 && ranges[0].1 >= file_size
     }
 }

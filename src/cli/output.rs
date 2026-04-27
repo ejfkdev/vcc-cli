@@ -1,8 +1,12 @@
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 thread_local! {
     static JSON_MODE: Cell<bool> = const { Cell::new(false) };
 }
+
+/// 全局调试模式标志（--debug 参数，启用 [PERF] 性能日志输出）
+static DEBUG_MODE: AtomicBool = AtomicBool::new(false);
 
 /// 设置输出模式
 pub(crate) fn set_json_mode(json: bool) {
@@ -12,6 +16,27 @@ pub(crate) fn set_json_mode(json: bool) {
 /// 是否 JSON 输出模式
 pub(crate) fn is_json_mode() -> bool {
     JSON_MODE.with(|f| f.get())
+}
+
+/// 设置调试模式（--debug 参数）
+pub fn set_debug_mode(debug: bool) {
+    DEBUG_MODE.store(debug, Ordering::Relaxed);
+}
+
+/// 是否调试模式（启用 [PERF] 性能日志输出）
+pub fn is_debug_mode() -> bool {
+    DEBUG_MODE.load(Ordering::Relaxed)
+}
+
+/// 性能日志宏：仅在 --debug 模式下输出到 stderr
+/// 用法：`perf_log!("[PERF] xxx: {:.1}ms", elapsed);`
+#[macro_export]
+macro_rules! perf_log {
+    ($($arg:tt)*) => {
+        if $crate::cli::output::is_debug_mode() {
+            eprintln!($($arg)*);
+        }
+    };
 }
 
 /// 输出操作成功消息

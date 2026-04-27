@@ -108,8 +108,7 @@ impl TimeRange {
         let today_start = now_local
             .date_naive()
             .and_hms_opt(0, 0, 0)
-            .map(|dt| chrono::Local.from_local_datetime(&dt).single())
-            .flatten()
+            .and_then(|dt| chrono::Local.from_local_datetime(&dt).single())
             .map(|dt| dt.timestamp_millis())?;
         let day_ms = 24 * 3600 * 1000_i64;
         match self {

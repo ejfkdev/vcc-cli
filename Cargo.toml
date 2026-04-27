@@ -9,7 +9,7 @@ homepage = "https://github.com/ejfkdev/vcc-cli"
 readme = "README.md"
 keywords = ["cli", "ai", "config", "mcp", "claude"]
 categories = ["command-line-utilities"]
-rust-version = "1.75"
+rust-version = "1.80"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "string"] }

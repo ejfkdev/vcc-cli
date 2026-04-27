@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use crate::perf_log;
 use std::collections::HashMap;
 use std::io::BufRead;
 
@@ -16,7 +17,7 @@ use crate::session::model::{date_to_ms, ms_to_datetime, TimeRange, TokenUsage, U
 // ══════════════════════════════════════════════════════════
 
 /// Token 用量对应的价格明细（USD）
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct TokenPrice {
     input_cost: f64,
     output_cost: f64,
@@ -46,7 +47,7 @@ impl std::ops::AddAssign for TokenPrice {
 }
 
 impl TokenPrice {
-    fn to_json(&self) -> serde_json::Value {
+    fn to_json(self) -> serde_json::Value {
         serde_json::json!({
             "input_cost": round_price(self.input_cost),
             "output_cost": round_price(self.output_cost),
@@ -249,7 +250,7 @@ fn extract_session_tokens(
     for u in &usages {
         let price = usage_or_calc_price(&u.model, &u.usage, u.cost_usd);
         *by_model.entry(u.model.clone()).or_default() += u.usage.clone();
-        *cost_by_model.entry(u.model.clone()).or_default() += price.clone();
+        *cost_by_model.entry(u.model.clone()).or_default() += price;
         total += u.usage.clone();
         total_cost += price;
     }
@@ -266,8 +267,8 @@ fn save_usage_cache_entry(
         None => return,
     };
     // 按 (date, model) 聚合为 daily
-    let mut daily: std::collections::HashMap<String, Vec<CachedDailyUsage>> =
-        std::collections::HashMap::new();
+    let mut daily: HashMap<String, Vec<CachedDailyUsage>> =
+        HashMap::new();
     for u in usages {
         let date = u.date.clone().unwrap_or_default();
         let entries = daily.entry(date).or_default();
@@ -551,12 +552,12 @@ pub(crate) fn show_usage(
     } else {
         range
     };
-    eprintln!("[PERF] 1.load_mappings: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF] 1.load_mappings: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
 
     // ── Stage 2: scan_sessions (file glob + metadata) ──
     let t1 = std::time::Instant::now();
     let all_sessions = scan_all_sessions(&mappings, effective_range.start_ms());
-    eprintln!("[PERF] 2.scan_sessions: {:.1}ms ({} sessions)", t1.elapsed().as_secs_f64() * 1000.0, all_sessions.len());
+    perf_log!("[PERF] 2.scan_sessions: {:.1}ms ({} sessions)", t1.elapsed().as_secs_f64() * 1000.0, all_sessions.len());
     if all_sessions.is_empty() {
         println!("No sessions found.");
         return Ok(());
@@ -568,20 +569,21 @@ pub(crate) fn show_usage(
         session::extract_all_usage(&all_sessions, &mappings, effective_range)
             .into_iter()
             .filter(|u| {
+                let date_ms = u.date.as_ref().and_then(|d| date_to_ms(d)).unwrap_or(0);
                 if let Some(from) = from_ms {
-                    if u.date.as_ref().and_then(|d| date_to_ms(d)).unwrap_or(0) < from {
+                    if date_ms < from {
                         return false;
                     }
                 }
                 if let Some(to) = to_ms {
-                    if u.date.as_ref().and_then(|d| date_to_ms(d)).unwrap_or(0) >= to {
+                    if date_ms >= to {
                         return false;
                     }
                 }
                 true
             })
             .collect();
-    eprintln!("[PERF] 3.extract_all_usage: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF] 3.extract_all_usage: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
 
     if summaries.is_empty() {
         if is_json_mode() {
@@ -596,7 +598,7 @@ pub(crate) fn show_usage(
     let t3 = std::time::Instant::now();
     let dims = parse_by_dims(by);
     let aggregated = aggregate_by_dims(&summaries, &dims);
-    eprintln!("[PERF] 4.aggregate+price: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF] 4.aggregate+price: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
     // ── Stage 5: output ──
     let t4 = std::time::Instant::now();
@@ -619,8 +621,8 @@ pub(crate) fn show_usage(
     } else {
         print_usage_table(&aggregated, &dims, &range, from, to);
     }
-    eprintln!("[PERF] 5.output: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
-    eprintln!("[PERF] TOTAL: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF] 5.output: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF] TOTAL: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
     Ok(())
 }
 
@@ -658,25 +660,30 @@ struct AggRow {
     cost: TokenPrice,
 }
 
+struct DimFlags {
+    has_day: bool,
+    has_tool: bool,
+    has_model: bool,
+}
+
+impl DimFlags {
+    fn from_dims(dims: &[String]) -> Self {
+        Self {
+            has_day: dims.iter().any(|d| d == "day"),
+            has_tool: dims.iter().any(|d| d == "tool"),
+            has_model: dims.iter().any(|d| d == "model"),
+        }
+    }
+}
+
 fn aggregate_by_dims(summaries: &[UsageSummary], dims: &[String]) -> Vec<AggRow> {
+    let flags = DimFlags::from_dims(dims);
     let mut map: HashMap<AggKey, AggRow> = HashMap::new();
     for u in summaries {
         let key = AggKey {
-            date: if dims.iter().any(|d| d == "day") {
-                u.date.clone()
-            } else {
-                None
-            },
-            tool: if dims.iter().any(|d| d == "tool") {
-                Some(u.tool.clone())
-            } else {
-                None
-            },
-            model: if dims.iter().any(|d| d == "model") {
-                Some(u.model.clone())
-            } else {
-                None
-            },
+            date: if flags.has_day { u.date.clone() } else { None },
+            tool: if flags.has_tool { Some(u.tool.clone()) } else { None },
+            model: if flags.has_model { Some(u.model.clone()) } else { None },
         };
         let price = usage_or_calc_price(&u.model, &u.usage, u.cost_usd);
         let entry = map.entry(key.clone()).or_insert_with(|| AggRow {
@@ -717,33 +724,39 @@ fn print_usage_table(
         .to_string()
     };
     println!("Token Usage ({})\n", range_label);
-    let sd = dims.iter().any(|d| d == "day");
-    let st = dims.iter().any(|d| d == "tool");
-    let sm = dims.iter().any(|d| d == "model");
+    let flags = DimFlags::from_dims(dims);
+    // 动态计算各列宽度：取表头和数据中最宽的那个
+    let mut max_date = 4;   // "DATE"
+    let mut max_tool = 4;   // "TOOL"
+    let mut max_model = 5;  // "MODEL"
+    for row in rows {
+        if let Some(d) = &row.key.date { max_date = max_date.max(d.len()); }
+        if let Some(t) = &row.key.tool { max_tool = max_tool.max(t.len()); }
+        if let Some(m) = &row.key.model { max_model = max_model.max(m.len()); }
+    }
+    // 也考虑 TOTAL 行
+    max_tool = max_tool.max(5); // "TOTAL"
     let fmt_row = |k: &AggKey| -> String {
         let mut s = String::new();
-        if sd {
-            s.push_str(&format!("{:<12}", k.date.as_deref().unwrap_or("-")));
+        if flags.has_day {
+            s.push_str(&format!("{:<width$} ", k.date.as_deref().unwrap_or("-"), width = max_date));
         }
-        if st {
-            s.push_str(&format!("{:<10}", k.tool.as_deref().unwrap_or("-")));
+        if flags.has_tool {
+            s.push_str(&format!("{:<width$} ", k.tool.as_deref().unwrap_or("-"), width = max_tool));
         }
-        if sm {
-            s.push_str(&format!(
-                "{:<24}",
-                session::truncate_str(k.model.as_deref().unwrap_or("-"), 22)
-            ));
+        if flags.has_model {
+            s.push_str(&format!("{:<width$} ", k.model.as_deref().unwrap_or("-"), width = max_model));
         }
         s
     };
     let mut hdr_key = AggKey::default();
-    if sd {
+    if flags.has_day {
         hdr_key.date = Some("DATE".into());
     }
-    if st {
+    if flags.has_tool {
         hdr_key.tool = Some("TOOL".into());
     }
-    if sm {
+    if flags.has_model {
         hdr_key.model = Some("MODEL".into());
     }
     let hdr = format!(
@@ -773,11 +786,11 @@ fn print_usage_table(
         to2 += row.usage.output_tokens;
         tcr += row.usage.cache_read_tokens;
         tcc += row.usage.cache_creation_tokens;
-        total_cost += row.cost.clone();
+        total_cost += row.cost;
     }
     println!("{}", "-".repeat(hdr.len()));
     let mut total_key = AggKey::default();
-    if st {
+    if flags.has_tool {
         total_key.tool = Some("TOTAL".into());
     }
     println!(

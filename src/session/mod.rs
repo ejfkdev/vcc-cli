@@ -10,6 +10,7 @@ use crate::session::cache::{
     SubagentFileState, UnifiedCache,
 };
 use crate::session::model::{DeleteOutcome, SessionMeta, TimeRange, TokenUsage, UsageSummary};
+use crate::perf_log;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
@@ -82,7 +83,7 @@ pub(crate) fn extract_all_usage(
     let t0 = std::time::Instant::now();
     let start_ms = range.start_ms();
     let mut cache = UnifiedCache::load().ok().unwrap_or_default();
-    eprintln!("[PERF]   3a.cache_load: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF]   3a.cache_load: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
 
     let t_upsert = std::time::Instant::now();
     let mut cache_dirty = false;
@@ -93,7 +94,7 @@ pub(crate) fn extract_all_usage(
             cache_dirty = true;
         }
     }
-    eprintln!("[PERF]   3b.cache_upsert: {:.1}ms", t_upsert.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF]   3b.cache_upsert: {:.1}ms", t_upsert.elapsed().as_secs_f64() * 1000.0);
 
     let filtered: Vec<&SessionMeta> = sessions
         .iter()
@@ -116,7 +117,7 @@ pub(crate) fn extract_all_usage(
 
     // 按文件大小降序排列，确保大 session 配对处理（减少总 wall time）
     let mut filtered = filtered;
-    filtered.sort_by(|a, b| b.file_size.cmp(&a.file_size));
+    filtered.sort_by_key(|b| std::cmp::Reverse(b.file_size));
 
     // 阶段 2：提取 usage
     // 策略：session 间并行处理（2个一批），session 内 main→sub 串行
@@ -142,7 +143,7 @@ pub(crate) fn extract_all_usage(
         })
         .collect();
 
-    eprintln!("[PERF]   3c.parallel_extract: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF]   3c.parallel_extract: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
     let t2 = std::time::Instant::now();
     let mut summaries: Vec<UsageSummary> = Vec::new();
@@ -157,13 +158,11 @@ pub(crate) fn extract_all_usage(
     // 只在有实际更新时才执行
     if cache_dirty {
         cache.purge_missing();
-    }
-    if cache_dirty {
         if let Err(e) = cache.save() {
             eprintln!("warning: failed to save cache: {}", e);
         }
     }
-    eprintln!("[PERF]   3d.cache_save+merge: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
+    perf_log!("[PERF]   3d.cache_save+merge: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
     // 输出阶段按日期过滤
     filter_by_date(summaries, start_ms)
 }
@@ -180,7 +179,7 @@ fn filter_by_date(usages: Vec<UsageSummary>, start_ms: Option<i64>) -> Vec<Usage
             u.date
                 .as_ref()
                 .and_then(|d| model::date_to_ms(d))
-                .is_none_or(|ms| ms + 86400_000 > start)
+                .map_or(true, |ms| ms + 86_400_000 > start)
         })
         .collect()
 }
@@ -203,11 +202,8 @@ fn process_session(
     let status = cache.check_cache_status(&session.tool, &session.session_id, &session.source_path);
 
     let cache_range_compatible = cache.get_usage(&session.tool, &session.session_id)
-        .is_none_or(|u| {
-            if start_ms.is_none() && u.parsed_range_start_ms.is_some() {
-                return false;
-            }
-            true
+        .map_or(true, |u| {
+            !(start_ms.is_none() && u.parsed_range_start_ms.is_some())
         });
 
     let effective_status = if !cache_range_compatible {
@@ -270,9 +266,8 @@ fn process_session(
             }
         }
         CacheStatus::Miss => {
-            if session.tool == "claude" && cached_usage.is_some() {
-                let ce = cached_usage.unwrap();
-                let subagent_changed = check_subagent_changes(session, &ce);
+            if let Some(ce) = cached_usage.as_ref() {
+                let subagent_changed = check_subagent_changes(session, ce);
                 if subagent_changed {
                     let r = extract_usage(mapping, session, start_ms).ok()?;
                     let new_data = build_usage_data(
@@ -280,10 +275,10 @@ fn process_session(
                     );
                     (r.usages, new_data)
                 } else {
-                    match incremental_extract(mapping, session, &ce, false) {
+                    match incremental_extract(mapping, session, ce, false) {
                         Ok((merged_usages, st, fbo, subagent_state)) => {
                             let new_data = build_usage_data(
-                                session, &merged_usages, st.as_ref(), Some(&ce), fbo, subagent_state, start_ms,
+                                session, &merged_usages, st.as_ref(), Some(ce), fbo, subagent_state, start_ms,
                             );
                             (merged_usages, new_data)
                         }
@@ -313,12 +308,14 @@ fn process_session(
     })
 }
 
+type IncrementalResult = Result<(Vec<UsageSummary>, Option<codex::CodexIncrementalState>, u64, HashMap<String, SubagentFileState>)>;
+
 fn incremental_extract(
     mapping: &ToolMapping,
     session: &SessionMeta,
     cached: &CachedUsageData,
     subagent_changed: bool,
-) -> Result<(Vec<UsageSummary>, Option<codex::CodexIncrementalState>, u64, HashMap<String, SubagentFileState>)> {
+) -> IncrementalResult {
     match mapping.tool.name.as_str() {
         "claude" => {
             // 1. 解析主文件增量
@@ -489,10 +486,8 @@ fn build_usage_data(
     subagent_files: HashMap<String, SubagentFileState>,
     range_start_ms: Option<i64>,
 ) -> Option<CachedUsageData> {
-    let (_modified_ms, file_size) = match file_meta(&session.source_path) {
-        Some(m) => m,
-        None => (0, 0),
-    };
+    let (_modified_ms, file_size) = file_meta(&session.source_path)
+        .unwrap_or((0, 0));
 
     // 从 prev_data 继承 processed_ranges
     let mut processed_ranges = prev_data
