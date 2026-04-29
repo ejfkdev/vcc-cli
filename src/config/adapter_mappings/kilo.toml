@@ -1,0 +1,22 @@
+[tool]
+name = "kilo"
+config_dir = "~/.local/share/kilo"
+
+[session]
+format = "sqlite"
+path = "kilo.db"
+
+[session.sqlite]
+session_query = "SELECT DISTINCT json_extract(data, '$.session_id') as id FROM message WHERE json_extract(data, '$.role') = 'assistant' AND json_extract(data, '$.tokens') IS NOT NULL"
+usage_query = "SELECT id, data FROM message WHERE json_extract(data, '$.session_id') = '{session_id}' AND json_extract(data, '$.role') = 'assistant' AND json_extract(data, '$.tokens') IS NOT NULL"
+model_column = ""
+default_model = "kilo"
+json_column = "data"
+json_model_path = "modelID"
+json_cost_path = "cost"
+
+[session.sqlite.json_token_map]
+input = "tokens.input"
+output = "tokens.output"
+cache_read = "tokens.cache.read"
+cache_creation = "tokens.cache.write"

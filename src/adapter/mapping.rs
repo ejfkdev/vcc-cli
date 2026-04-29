@@ -398,6 +398,166 @@ pub(crate) struct SessionMappingConfig {
     #[serde(default)]
     pub exclude_prefix: String,
     pub resume_command: Option<String>,
+    /// 通用 JSONL 解析配置（Qwen, Pi, OpenClaw, Copilot 等）
+    #[serde(default)]
+    pub jsonl: Option<JsonlParseConfig>,
+    /// 通用 JSON 解析配置（Droid, Mux, Amp 等）
+    #[serde(default)]
+    pub json: Option<JsonParseConfig>,
+    /// 通用 SQLite 解析配置（Hermes, Kilo, Crush 等）
+    #[serde(default)]
+    pub sqlite: Option<SqliteParseConfig>,
+    /// 数据目录解析策略：home（默认），xdg_data，env_var
+    #[serde(default)]
+    pub data_dir_strategy: String,
+    /// data_dir_strategy = "env_var" 时的环境变量名
+    pub data_dir_env_var: Option<String>,
+    /// data_dir_strategy = "env_var" 时的回退相对路径
+    pub data_dir_fallback: Option<String>,
+}
+
+/// 通用 JSONL 解析配置
+/// 驱动 jsonl_generic 管线：逐行读取 JSONL，按 filter 过滤，按 token_map 提取字段
+#[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)]
+pub(crate) struct JsonlParseConfig {
+    /// 行过滤条件 {field: value}，AND 逻辑
+    /// 例如：{"type": "assistant"} 或 {"type": "message", "role": "assistant"}
+    #[serde(default)]
+    pub filter: HashMap<String, String>,
+    /// 模型名字段的点分路径（如 "model", "message.model"）
+    pub model_path: Option<String>,
+    /// 默认模型名
+    #[serde(default)]
+    pub default_model: String,
+    /// TokenUsage 字段映射 {vcc_field: json_path}
+    /// vcc_field: input, output, cache_read, cache_creation, reasoning
+    /// json_path: 点分路径（如 "usageMetadata.promptTokenCount"）
+    #[serde(default)]
+    pub token_map: HashMap<String, String>,
+    /// 费用字段的点分路径（如 "cost.total"）
+    pub cost_path: Option<String>,
+    /// 时间戳字段的点分路径（如 "timestamp"）
+    pub timestamp_path: Option<String>,
+    /// Session ID 字段路径（用于第一行 session 检测，如 Pi 的 "id"）
+    pub session_id_path: Option<String>,
+    /// 标题字段路径
+    pub title_path: Option<String>,
+    /// 项目目录字段路径（如 Pi 的 "cwd"）
+    pub cwd_path: Option<String>,
+    /// 是否从 input 中减去 cache_read（Copilot OTEL 归一化）
+    #[serde(default)]
+    pub normalize_cache_read: bool,
+    /// 模型变更事件的过滤条件（OpenClaw: {type = "custom", customType = "model-snapshot"}）
+    #[serde(default)]
+    pub model_change_filter: HashMap<String, String>,
+    /// 模型变更行中模型名的路径（如 "data.modelId"）
+    pub model_change_path: Option<String>,
+    /// 去重键字段路径（如 Copilot 的 "traceId:spanId"）
+    pub dedup_key_paths: Option<String>,
+}
+
+/// 通用 JSON 解析配置
+/// 驱动 json_generic 管线：读取 JSON 文件，按策略提取 usage
+#[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)]
+pub(crate) struct JsonParseConfig {
+    /// 解析策略："flat"（单条记录）, "messages"（迭代消息数组）, "by_model"（迭代模型哈希表）
+    #[serde(default)]
+    pub strategy: String,
+    /// Session ID 字段路径
+    pub session_id_path: Option<String>,
+    /// 标题字段路径
+    pub title_path: Option<String>,
+    /// 创建时间字段路径
+    pub created_at_path: Option<String>,
+    /// 最后活跃时间字段路径
+    pub last_active_at_path: Option<String>,
+    /// 项目目录字段路径
+    pub project_dir_path: Option<String>,
+    /// 消息数组路径（如 "messages"）
+    pub messages_path: Option<String>,
+    /// 消息过滤条件 {field: value}
+    #[serde(default)]
+    pub message_filter: HashMap<String, String>,
+    /// 消息内模型名字段路径
+    pub model_path: Option<String>,
+    /// 默认模型名
+    #[serde(default)]
+    pub default_model: String,
+    /// 消息内 TokenUsage 字段映射 {vcc_field: json_path}
+    #[serde(default)]
+    pub token_map: HashMap<String, String>,
+    /// 消息内费用字段路径
+    pub cost_path: Option<String>,
+    /// 消息内时间戳字段路径
+    pub timestamp_path: Option<String>,
+    /// byModel 哈希表路径（Mux: "byModel"）
+    pub by_model_path: Option<String>,
+    /// byModel 策略：模型名是否含 provider 前缀（如 "anthropic:claude-opus-4-6"）
+    #[serde(default)]
+    pub by_model_provider_prefix: bool,
+    /// byModel 每个 bucket 内 token 字段映射
+    #[serde(default)]
+    pub by_model_token_map: HashMap<String, String>,
+    /// byModel 每个 bucket 内 cost 字段路径
+    pub by_model_cost_path: Option<String>,
+    /// byModel 最后请求时间字段路径
+    pub by_model_timestamp_path: Option<String>,
+    /// 模型名归一化规则（如 Droid: 去中括号、转小写、点转横杠）
+    #[serde(default)]
+    pub model_normalize: String,
+}
+
+/// 通用 SQLite 解析配置
+/// 驱动 sqlite_generic 管线：打开 SQLite，执行配置的 SQL 查询
+#[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)]
+pub(crate) struct SqliteParseConfig {
+    /// 会话列表 SQL（用于 scan_sessions）
+    pub session_query: Option<String>,
+    /// 会话查询列映射
+    pub session_columns: Option<SessionColumnMap>,
+    /// 使用量查询 SQL（支持 {session_id} 占位符）
+    pub usage_query: Option<String>,
+    /// 列名映射 {vcc_field: column_name}
+    #[serde(default)]
+    pub column_map: HashMap<String, String>,
+    /// 模型名列名
+    pub model_column: Option<String>,
+    /// 默认模型名
+    #[serde(default)]
+    pub default_model: String,
+    /// 费用列名（优先）
+    pub cost_column: Option<String>,
+    /// 费用列名（备选）
+    pub cost_column_fallback: Option<String>,
+    /// 是否使用 JSON 列提取 tokens（如 Kilo 的 data 列）
+    #[serde(default)]
+    pub json_column: Option<String>,
+    /// JSON 列内的 token 字段映射
+    #[serde(default)]
+    pub json_token_map: HashMap<String, String>,
+    /// JSON 列内的模型名字段路径
+    pub json_model_path: Option<String>,
+    /// JSON 列内的费用字段路径
+    pub json_cost_path: Option<String>,
+    /// 项目注册表文件（如 Crush 的 projects.json）
+    pub projects_registry: Option<String>,
+    /// 递增查询的排序列（用于增量缓存）
+    pub incremental_column: Option<String>,
+}
+
+/// 会话查询列映射
+#[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)]
+pub(crate) struct SessionColumnMap {
+    pub id: String,
+    pub title: Option<String>,
+    pub project_dir: Option<String>,
+    pub created_at: Option<String>,
+    pub last_active_at: Option<String>,
+    pub model: Option<String>,
 }
 
 impl SessionMappingConfig {
@@ -539,6 +699,22 @@ impl ToolMapping {
         Self::load(content)
     }
     pub fn resolved_config_dir(&self) -> Option<PathBuf> {
+        // 支持 env_var 策略：先从环境变量获取路径
+        if self.session.data_dir_strategy == "env_var" {
+            if let Some(env_var) = &self.session.data_dir_env_var {
+                if let Ok(val) = std::env::var(env_var) {
+                    let p = PathBuf::from(&val);
+                    if p.is_absolute() && p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
+            // 回退到默认路径
+            if let Some(fallback) = &self.session.data_dir_fallback {
+                let path = fallback.strip_prefix("~/").unwrap_or(fallback);
+                return dirs::home_dir().map(|h| h.join(path));
+            }
+        }
         let path = self
             .tool
             .config_dir

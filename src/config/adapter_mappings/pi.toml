@@ -1,0 +1,22 @@
+[tool]
+name = "pi"
+config_dir = "~/.pi"
+
+[session]
+format = "jsonl"
+path = "agent/sessions"
+resume_command = "pi --resume {id}"
+
+[session.jsonl]
+filter = { type = "message", role = "assistant" }
+model_path = "message.model"
+default_model = "pi"
+timestamp_path = "timestamp"
+session_id_path = "id"
+cwd_path = "cwd"
+
+[session.jsonl.token_map]
+input = "message.usage.input"
+output = "message.usage.output"
+cache_read = "message.usage.cacheRead"
+cache_creation = "message.usage.cacheWrite"

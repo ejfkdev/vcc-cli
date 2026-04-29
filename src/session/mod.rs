@@ -1,8 +1,13 @@
 pub mod cache;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
+pub mod json_generic;
+pub mod jsonl_generic;
 pub mod kimi;
 pub mod model;
+pub mod rookilo;
+pub mod sqlite_generic;
 
 use crate::adapter::mapping::ToolMapping;
 use crate::session::cache::{
@@ -28,14 +33,25 @@ pub(crate) fn scan_sessions(
         _ => return Ok(Vec::new()),
     };
     match session.format.as_str() {
+        // JSONL: 自定义解析器优先，其余走通用管线
         "jsonl" => match mapping.tool.name.as_str() {
             "claude" => claude::scan_sessions(&config_dir, mapping, min_mtime_ms),
             "codex" => codex::scan_sessions(&config_dir, mapping, min_mtime_ms),
-            _ => Ok(Vec::new()),
+            _ => jsonl_generic::scan_sessions(&config_dir, mapping, min_mtime_ms),
         },
-        "json" => scan_gemini_sessions(&config_dir, mapping, min_mtime_ms),
+        // JSON: 自定义解析器优先，其余走通用管线
+        "json" => match mapping.tool.name.as_str() {
+            "gemini" => scan_gemini_sessions(&config_dir, mapping, min_mtime_ms),
+            _ => json_generic::scan_sessions(&config_dir, mapping, min_mtime_ms),
+        },
         "opencode_json" => scan_opencode_sessions(&config_dir, mapping, min_mtime_ms),
         "kimi_dir" => kimi::scan_sessions(&config_dir, mapping, min_mtime_ms),
+        // RooCode/KiloCode: 自定义双编码 JSON 解析
+        "roo_kilo" => rookilo::scan_sessions(&config_dir, mapping, min_mtime_ms),
+        // SQLite: 走通用管线
+        "sqlite" => sqlite_generic::scan_sessions(&config_dir, mapping, min_mtime_ms),
+        // Cursor CSV
+        "cursor_csv" => cursor::scan_sessions(&config_dir, mapping, min_mtime_ms),
         _ => Ok(Vec::new()),
     }
 }
@@ -46,33 +62,107 @@ pub(crate) fn extract_usage(
     range_start_ms: Option<i64>,
 ) -> Result<claude::ExtractResult> {
     Ok(match mapping.tool.name.as_str() {
+        // 自定义解析器
         "claude" => claude::extract_usage(session, range_start_ms)?,
         "codex" => claude::ExtractResult {
             usages: codex::extract_usage(session)?,
             first_byte_offset: 0,
             subagent_files: HashMap::new(),
+            tool_state: None,
         },
         "gemini" => claude::ExtractResult {
             usages: extract_gemini_usage(session)?,
             first_byte_offset: 0,
             subagent_files: HashMap::new(),
+            tool_state: None,
         },
         "opencode" => claude::ExtractResult {
             usages: Vec::new(),
             first_byte_offset: 0,
             subagent_files: HashMap::new(),
+            tool_state: None,
         },
         "kimi" => claude::ExtractResult {
             usages: kimi::extract_usage(session)?,
             first_byte_offset: 0,
             subagent_files: HashMap::new(),
+            tool_state: None,
         },
-        _ => claude::ExtractResult {
-            usages: Vec::new(),
-            first_byte_offset: 0,
-            subagent_files: HashMap::new(),
+        // RooCode/KiloCode
+        "roocode" | "kilocode" => match rookilo::extract_usage(session) {
+            Ok(usages) => claude::ExtractResult {
+                usages,
+                first_byte_offset: 0,
+                subagent_files: HashMap::new(),
+                tool_state: None,
+            },
+            Err(_) => claude::ExtractResult::default(),
         },
+        // Cursor CSV
+        "cursor" => match cursor::extract_usage(session) {
+            Ok(usages) => claude::ExtractResult {
+                usages,
+                first_byte_offset: 0,
+                subagent_files: HashMap::new(),
+                tool_state: None,
+            },
+            Err(_) => claude::ExtractResult::default(),
+        },
+        // 通用管线
+        _ => generic_extract_usage(mapping, session),
     })
+}
+
+/// 通用管线 usage 提取：按格式分派到对应的 generic 模块
+fn generic_extract_usage(mapping: &ToolMapping, session: &SessionMeta) -> claude::ExtractResult {
+    match mapping.session.format.as_str() {
+        "jsonl" => {
+            if let Some(config) = &mapping.session.jsonl {
+                match jsonl_generic::extract_usage(session, config) {
+                    Ok(r) => claude::ExtractResult {
+                        usages: r.usages,
+                        first_byte_offset: r.first_byte_offset,
+                        subagent_files: r.subagent_files,
+                        tool_state: r.tool_state,
+                    },
+                    Err(_) => claude::ExtractResult::default(),
+                }
+            } else {
+                claude::ExtractResult::default()
+            }
+        }
+        "json" => {
+            if let Some(config) = &mapping.session.json {
+                match json_generic::extract_usage(session, config) {
+                    Ok(r) => claude::ExtractResult {
+                        usages: r.usages,
+                        first_byte_offset: 0,
+                        subagent_files: HashMap::new(),
+                        tool_state: None,
+                    },
+                    Err(_) => claude::ExtractResult::default(),
+                }
+            } else {
+                claude::ExtractResult::default()
+            }
+        }
+        "sqlite" => {
+            if let Some(config) = &mapping.session.sqlite {
+                match sqlite_generic::extract_usage(session, config) {
+                    Ok(r) => claude::ExtractResult {
+                        usages: r.usages,
+                        first_byte_offset: 0,
+                        subagent_files: HashMap::new(),
+                        tool_state: None,
+                    },
+                    Err(_) => claude::ExtractResult::default(),
+                }
+            } else {
+                claude::ExtractResult::default()
+            }
+        }
+        _ => claude::ExtractResult::default(),
+    }
 }
 
 pub(crate) fn extract_all_usage(
@@ -228,28 +318,33 @@ fn process_session(
             let usages = cache.load_usages_in_range(&session.tool, &session.session_id, None);
             (usages, None)
         }
-        CacheStatus::Incremental => {
+        CacheStatus::Incremental | CacheStatus::Miss => {
             match cached_usage {
                 Some(ce) => {
                     let subagent_changed = check_subagent_changes(session, &ce);
-                    if subagent_changed {
+                    // Miss 且文件可能缩小（last_byte_offset > 当前文件大小）→ 必须全量解析
+                    let file_shrunk = effective_status == CacheStatus::Miss
+                        && std::fs::metadata(&session.source_path)
+                            .map(|m| m.len() < ce.last_byte_offset)
+                            .unwrap_or(false);
+                    if subagent_changed || file_shrunk {
                         let r = extract_usage(mapping, session, start_ms).ok()?;
                         let new_data = build_usage_data(
-                            session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                            session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms, r.tool_state,
                         );
                         (r.usages, new_data)
                     } else {
-                        match incremental_extract(mapping, session, &ce, false) {
-                            Ok((merged_usages, st, fbo, subagent_state)) => {
+                        match incremental_extract(mapping, session, &ce) {
+                            Ok((merged_usages, st, fbo, subagent_state, tool_state)) => {
                                 let new_data = build_usage_data(
-                                    session, &merged_usages, st.as_ref(), Some(&ce), fbo, subagent_state, start_ms,
+                                    session, &merged_usages, st.as_ref(), Some(&ce), fbo, subagent_state, start_ms, tool_state,
                                 );
                                 (merged_usages, new_data)
                             }
                             Err(_) => {
                                 let r = extract_usage(mapping, session, start_ms).ok()?;
                                 let new_data = build_usage_data(
-                                    session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                                    session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms, r.tool_state,
                                 );
                                 (r.usages, new_data)
                             }
@@ -259,44 +354,10 @@ fn process_session(
                 None => {
                     let r = extract_usage(mapping, session, start_ms).ok()?;
                     let new_data = build_usage_data(
-                        session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
+                        session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms, r.tool_state,
                     );
                     (r.usages, new_data)
                 }
-            }
-        }
-        CacheStatus::Miss => {
-            if let Some(ce) = cached_usage.as_ref() {
-                let subagent_changed = check_subagent_changes(session, ce);
-                if subagent_changed {
-                    let r = extract_usage(mapping, session, start_ms).ok()?;
-                    let new_data = build_usage_data(
-                        session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
-                    );
-                    (r.usages, new_data)
-                } else {
-                    match incremental_extract(mapping, session, ce, false) {
-                        Ok((merged_usages, st, fbo, subagent_state)) => {
-                            let new_data = build_usage_data(
-                                session, &merged_usages, st.as_ref(), Some(ce), fbo, subagent_state, start_ms,
-                            );
-                            (merged_usages, new_data)
-                        }
-                        Err(_) => {
-                            let r = extract_usage(mapping, session, start_ms).ok()?;
-                            let new_data = build_usage_data(
-                                session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
-                            );
-                            (r.usages, new_data)
-                        }
-                    }
-                }
-            } else {
-                let r = extract_usage(mapping, session, start_ms).ok()?;
-                let new_data = build_usage_data(
-                    session, &r.usages, None, None, r.first_byte_offset, r.subagent_files, start_ms,
-                );
-                (r.usages, new_data)
             }
         }
     };
@@ -308,13 +369,12 @@ fn process_session(
     })
 }
 
-type IncrementalResult = Result<(Vec<UsageSummary>, Option<codex::CodexIncrementalState>, u64, HashMap<String, SubagentFileState>)>;
+type IncrementalResult = Result<(Vec<UsageSummary>, Option<codex::CodexIncrementalState>, u64, HashMap<String, SubagentFileState>, Option<serde_json::Value>)>;
 
 fn incremental_extract(
     mapping: &ToolMapping,
     session: &SessionMeta,
     cached: &CachedUsageData,
-    subagent_changed: bool,
 ) -> IncrementalResult {
     match mapping.tool.name.as_str() {
         "claude" => {
@@ -323,19 +383,13 @@ fn incremental_extract(
                 session, cached.last_byte_offset,
             )?;
 
-            // 2. 如果 subagent 有变化，增量解析 subagent
-            let (subagent_usages, subagent_state) = if subagent_changed {
-                claude::extract_subagent_incremental(
-                    session, &cached.subagent_files,
-                )?
-            } else {
-                (Vec::new(), cached.subagent_files.clone())
-            };
+            // 2. subagent 变更已由调用方检查，此处无需增量解析
+            let subagent_state = cached.subagent_files.clone();
 
-            // 3. 合并：缓存 + 主文件增量 + subagent 增量
-            let merged = merge_with_cache_and_subagent(cached, incremental, &subagent_usages, session);
+            // 3. 合并：缓存 + 主文件增量
+            let merged = merge_with_cache_and_subagent(cached, incremental, &[], session);
             let fbo = cached.first_byte_offset;
-            Ok((merged, None, fbo, subagent_state))
+            Ok((merged, None, fbo, subagent_state, None))
         }
         "codex" => {
             let (usages, state) = codex::extract_usage_incremental(
@@ -345,11 +399,31 @@ fn incremental_extract(
                 cached.codex_current_model.clone(),
                 &codex_cached_usages_from_daily(&cached.daily),
             )?;
-            Ok((usages, Some(state), 0, HashMap::new()))
+            Ok((usages, Some(state), 0, HashMap::new(), None))
         }
+        // 通用 JSONL 管线增量解析
+        _ if mapping.session.format == "jsonl" && mapping.session.jsonl.is_some() => {
+            let config = mapping.session.jsonl.as_ref().unwrap();
+            // 从 tool_state 恢复增量状态（current_model）
+            let prev_state: jsonl_generic::JsonlIncrementalState = cached
+                .tool_state
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let (incremental, fbo, state) = jsonl_generic::extract_usage_incremental(
+                session, config, cached.last_byte_offset, &prev_state,
+            )?;
+            // 合并缓存 + 增量
+            let merged = merge_with_cache_and_subagent(cached, incremental, &[], session);
+            // 保存增量状态到 tool_state
+            let tool_state = serde_json::to_value(&state).ok();
+            let subagent_files = cached.subagent_files.clone();
+            Ok((merged, None, fbo, subagent_files, tool_state))
+        }
+        // 其他工具：全量解析
         _ => {
             let r = extract_usage(mapping, session, None)?;
-            Ok((r.usages, None, r.first_byte_offset, r.subagent_files))
+            Ok((r.usages, None, r.first_byte_offset, r.subagent_files, r.tool_state))
         }
     }
 }
@@ -390,8 +464,8 @@ fn merge_with_cache_and_subagent(
             e.0.cache_creation_1h_tokens += cu.cache_creation_1h_tokens;
             e.0.web_search_requests += cu.web_search_requests;
             e.1 += cu.request_count;
-            if cu.cost_usd.is_some() {
-                e.2 = cu.cost_usd;
+            if let Some(c) = cu.cost_usd {
+                e.2 = Some(e.2.unwrap_or(0.0) + c);
             }
         }
     }
@@ -403,8 +477,8 @@ fn merge_with_cache_and_subagent(
         let e = merged.entry(key).or_default();
         e.0 += u.usage;
         e.1 += u.request_count;
-        if u.cost_usd.is_some() {
-            e.2 = u.cost_usd;
+        if let Some(c) = u.cost_usd {
+            e.2 = Some(e.2.unwrap_or(0.0) + c);
         }
     }
 
@@ -415,8 +489,8 @@ fn merge_with_cache_and_subagent(
         let e = merged.entry(key).or_default();
         e.0.add_assign_from(&u.usage);
         e.1 += u.request_count;
-        if u.cost_usd.is_some() {
-            e.2 = u.cost_usd;
+        if let Some(c) = u.cost_usd {
+            e.2 = Some(e.2.unwrap_or(0.0) + c);
         }
     }
 
@@ -485,6 +559,7 @@ fn build_usage_data(
     first_byte_offset: u64,
     subagent_files: HashMap<String, SubagentFileState>,
     range_start_ms: Option<i64>,
+    tool_state: Option<serde_json::Value>,
 ) -> Option<CachedUsageData> {
     let (_modified_ms, file_size) = file_meta(&session.source_path)
         .unwrap_or((0, 0));
@@ -496,7 +571,7 @@ fn build_usage_data(
 
     // 添加本次处理的范围
     if file_size > 0 {
-        let start = if first_byte_offset > 0 { first_byte_offset } else { 0 };
+        let start = first_byte_offset;
         processed_ranges.push((start, file_size));
         processed_ranges = merge_ranges(processed_ranges);
     }
@@ -520,8 +595,8 @@ fn build_usage_data(
             existing.cache_creation_1h_tokens += u.usage.cache_creation_1h_tokens;
             existing.web_search_requests += u.usage.web_search_requests;
             existing.request_count += u.request_count;
-            if u.cost_usd.is_some() {
-                existing.cost_usd = u.cost_usd;
+            if let Some(c) = u.cost_usd {
+                existing.cost_usd = Some(existing.cost_usd.unwrap_or(0.0) + c);
             }
         } else {
             entries.push(CachedDailyUsage::from_usage_summary(u));
@@ -549,6 +624,7 @@ fn build_usage_data(
         codex_current_model: ccm,
         subagent_files,
         parsed_range_start_ms: range_start_ms,
+        tool_state,
     })
 }
 
@@ -765,20 +841,25 @@ pub(crate) fn usages_from_maps(
         })
         .collect()
 }
-pub(crate) fn walkdir_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+/// 递归遍历目录，返回 (路径, Metadata) 列表
+/// 返回 Metadata 避免调用方重新 stat()，实测消除 ~126 次重复 stat 调用
+pub(crate) fn walkdir_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, std::fs::Metadata)>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
     let mut e = Vec::new();
     for (p, m) in read_dir_entries(dir)? {
         if m.is_dir() {
-            // 跳过 subagents 目录（由 extract_subagent_usage 按需处理）
+            // 跳过不需要递归的目录（这些目录含大量无关文件，递归进去只会浪费 stat()）
+            // subagents: 由 parse_subagent_messages_parallel 单独处理
+            // tool-results: 工具输出文件，不含 usage 数据
+            // memory: CLAUDE.md 等记忆文件，与 usage 无关
             let name = p.file_name().unwrap_or_default().to_string_lossy();
-            if name != "subagents" {
+            if name != "subagents" && name != "tool-results" && name != "memory" {
                 e.extend(walkdir_files(&p)?);
             }
         } else {
-            e.push(p);
+            e.push((p, m));
         }
     }
     Ok(e)
@@ -890,14 +971,14 @@ where
     }
     let mut s: Vec<SessionMeta> = walkdir_files(session_dir)?
         .into_iter()
-        .filter(|e| file_filter(e))
-        .filter(|e| {
+        .filter(|(e, _)| file_filter(e))
+        .filter(|(_, m)| {
             min_mtime_ms.map_or(true, |min| {
-                let m = mtime_ms(e);
-                m == 0 || m >= min
+                let ms = meta_mtime_ms(m);
+                ms == 0 || ms >= min
             })
         })
-        .filter_map(|e| parse_fn(&e))
+        .filter_map(|(e, _)| parse_fn(&e))
         .collect();
     s.sort_by_key(|b| std::cmp::Reverse(b.last_active_at));
     Ok(s)

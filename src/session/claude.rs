@@ -123,6 +123,20 @@ fn round_cost_usd(v: f64) -> f64 {
     (v * 100_000_000.0).round() / 100_000_000.0
 }
 
+/// 判断新 entry 是否应替换旧 entry（去重逻辑）
+/// 优先保留有 stop_reason 的，同 stop 状态保留 output_tokens 更大的
+#[inline]
+fn should_replace(old: Option<&MsgEntry>, new: &MsgEntry) -> bool {
+    match old {
+        None => true,
+        Some(old) => {
+            (!old.has_stop && new.has_stop)
+                || (old.has_stop == new.has_stop
+                    && new.usage.output_tokens > old.usage.output_tokens)
+        }
+    }
+}
+
 #[derive(serde::Deserialize, Default)]
 // Deserialize: fields parsed from external data, not all used
 #[allow(dead_code)]
@@ -253,6 +267,10 @@ pub(crate) fn scan_sessions(
     Ok(sessions)
 }
 
+/// 从缓存恢复 SessionMeta，避免重新 mmap 解析文件
+/// 精确匹配（size+mtime 一致）：直接复用，0 I/O
+/// 宽松匹配（size 增大，文件被 append）：复用 title/sid/cwd，只重算 last_active_at
+/// 文件缩小（异常场景）：返回 None，触发全量重解析
 fn session_meta_from_cache(
     path: &Path,
     mapping: &ToolMapping,
@@ -261,29 +279,97 @@ fn session_meta_from_cache(
     mtime: i64,
 ) -> Option<SessionMeta> {
     let cached = cache.get_session("claude", &path.file_stem()?.to_string_lossy())?;
-    if cached.source_path != path.to_string_lossy().as_ref()
-        || meta.len() != cached.file_size
-        || mtime != cached.file_modified_ms
-    {
+    if cached.source_path != path.to_string_lossy().as_ref() {
         return None;
     }
-    let mut s = super::build_session_meta(
-        mapping,
-        path,
-        cached.session_id.clone(),
-        cached.title.clone(),
-        cached.summary.clone(),
-        cached.project_dir.clone(),
-        cached.created_at,
-        cached.last_active_at,
-    );
-    s.file_modified_ms = mtime;
-    s.file_size = meta.len();
-    Some(s)
+
+    let file_size = meta.len();
+
+    // 精确匹配：path + size + mtime 完全一致 → 直接复用
+    if file_size == cached.file_size && mtime == cached.file_modified_ms {
+        let mut s = super::build_session_meta(
+            mapping,
+            path,
+            cached.session_id.clone(),
+            cached.title.clone(),
+            cached.summary.clone(),
+            cached.project_dir.clone(),
+            cached.created_at,
+            cached.last_active_at,
+        );
+        s.file_modified_ms = mtime;
+        s.file_size = file_size;
+        return Some(s);
+    }
+
+    // 宽松匹配：path 匹配 + size 增大（文件被 append）
+    // session 元数据（title, session_id, cwd）在 append 后通常不变，可以复用
+    // 只需重算 last_active_at（从文件尾部读取最新时间戳）
+    // 注意：file_size < cached.file_size（文件缩小/重建）走 None → 全量重解析，更安全
+    if file_size > cached.file_size {
+        let last_active_at = read_last_timestamp(path, file_size).or(cached.last_active_at);
+        let mut s = super::build_session_meta(
+            mapping,
+            path,
+            cached.session_id.clone(),
+            cached.title.clone(),
+            cached.summary.clone(),
+            cached.project_dir.clone(),
+            cached.created_at,
+            last_active_at,
+        );
+        s.file_modified_ms = mtime;
+        s.file_size = file_size;
+        return Some(s);
+    }
+
+    None
+}
+
+/// 从文件尾部 64KB 读取最后一行的时间戳（比 mmap 全文件映射更轻量）
+fn read_last_timestamp(path: &Path, file_size: u64) -> Option<i64> {
+    if file_size == 0 {
+        return None;
+    }
+    let tail_offset = file_size.saturating_sub(65536);
+    let mut buf = vec![0u8; (file_size - tail_offset) as usize];
+    let mut f = std::fs::File::open(path).ok()?;
+    std::io::Seek::seek(&mut f, SeekFrom::Start(tail_offset)).ok()?;
+    std::io::Read::read_exact(&mut f, &mut buf).ok()?;
+    // 从尾部反向扫描行，找最后一个有 timestamp 的行
+    let nl_pos: Vec<usize> = memchr::memchr_iter(b'\n', &buf).collect();
+    for i in (0..=nl_pos.len()).rev() {
+        let start = if i == 0 { 0 } else { nl_pos[i - 1] + 1 };
+        let end = if i < nl_pos.len() { nl_pos[i] } else { buf.len() };
+        if start >= end {
+            continue;
+        }
+        if let Some(ts) = extract_line_timestamp_ms(&buf[start..end]) {
+            return Some(ts);
+        }
+    }
+    None
 }
 
 fn parse_session_meta(path: &Path, mapping: &ToolMapping) -> Option<SessionMeta> {
-    let (head, tail) = read_head_tail(path, 30, 30).ok()?;
+    // mmap 一次性映射，替代多次文件打开（旧方案：read_head_tail 2次 + scan_compact_summary 1次 = 3次 open）
+    // mmap 虚拟内存映射成本极低（0.1ms/文件），按需 page fault 读数据
+    // 注意：即使文件 >4GB，mmap 本身不读数据，只有实际访问的页才会触发 I/O
+    let file = std::fs::File::open(path).ok()?;
+    let file_size = file.metadata().ok()?.len();
+    if file_size == 0 {
+        return None;
+    }
+    let data = unsafe { memmap2::Mmap::map(&file).ok()? };
+
+    // 提取前 500 行（零拷贝，引用 mmap 内存，不分配 String）
+    // 500 行覆盖 session_id + compact_summary + user messages，实测足够
+    let head_lines = extract_head_lines(&data, 500);
+    // 提取尾部 30 行（零拷贝，引用 mmap 末尾 64KB）
+    // tail 用于 last_active_at + summary，64KB 覆盖极端大行场景
+    let tail_start = (file_size as usize).saturating_sub(65536);
+    let tail_lines = extract_tail_lines(&data[tail_start..], 30);
+
     let mut sid = None;
     let mut cwd = None;
     let mut created_at = None;
@@ -292,8 +378,11 @@ fn parse_session_meta(path: &Path, mapping: &ToolMapping) -> Option<SessionMeta>
     let mut last_active_at = None;
     let mut summary = None;
     let mut compact_title = None;
-    for line in head.iter().chain(&tail) {
-        let Ok(cl) = sonic_rs::from_str::<ClaudeLine>(line) else {
+
+    // 先处理 head lines（包含 compact_summary 搜索）
+    for line in &head_lines {
+        let line_str = std::str::from_utf8(line).unwrap_or("");
+        let Ok(cl) = sonic_rs::from_str::<ClaudeLine>(line_str) else {
             continue;
         };
         if cl.session_id.is_some() {
@@ -311,12 +400,6 @@ fn parse_session_meta(path: &Path, mapping: &ToolMapping) -> Option<SessionMeta>
         if cl.custom_title.is_some() {
             custom_title = cl.custom_title;
         }
-        if let Some(ts) = &cl.timestamp {
-            last_active_at = super::parse_iso_timestamp(ts);
-        }
-        if cl.line_type.as_deref() == Some("summary") {
-            summary = cl.summary;
-        }
         if cl.is_compact_summary == Some(true) && compact_title.is_none() {
             compact_title = cl
                 .message
@@ -332,9 +415,30 @@ fn parse_session_meta(path: &Path, mapping: &ToolMapping) -> Option<SessionMeta>
             }
         }
     }
-    if compact_title.is_none() {
-        compact_title = scan_compact_summary(path);
+
+    // 再处理 tail lines（提取 summary, last_active_at, 补充 sid/cwd）
+    for line in &tail_lines {
+        let line_str = std::str::from_utf8(line).unwrap_or("");
+        let Ok(cl) = sonic_rs::from_str::<ClaudeLine>(line_str) else {
+            continue;
+        };
+        if cl.session_id.is_some() {
+            sid = cl.session_id;
+        }
+        if cwd.is_none() {
+            cwd = cl.cwd;
+        }
+        if let Some(ts) = &cl.timestamp {
+            last_active_at = super::parse_iso_timestamp(ts);
+        }
+        if cl.line_type.as_deref() == Some("summary") {
+            summary = cl.summary;
+        }
+        if cl.custom_title.is_some() {
+            custom_title = cl.custom_title;
+        }
     }
+
     if sid.is_none() {
         sid = super::fallback_session_id(path);
     }
@@ -359,6 +463,19 @@ pub(crate) struct ExtractResult {
     pub usages: Vec<UsageSummary>,
     pub first_byte_offset: u64,
     pub subagent_files: HashMap<String, SubagentFileState>,
+    /// 通用工具增量状态（如 JSONL 的 current_model），存入 CachedUsageData.tool_state
+    pub tool_state: Option<serde_json::Value>,
+}
+
+impl Default for ExtractResult {
+    fn default() -> Self {
+        Self {
+            usages: Vec::new(),
+            first_byte_offset: 0,
+            subagent_files: HashMap::new(),
+            tool_state: None,
+        }
+    }
 }
 
 pub(crate) fn extract_usage(
@@ -390,12 +507,13 @@ pub(crate) fn extract_usage(
         usages: summarize_messages(&tool, &messages, last_active_at)?,
         first_byte_offset: fbo,
         subagent_files,
+        tool_state: None,
     };
 
     if file_size > 500 * 1024 * 1024 {
         let wall = t0.elapsed().as_secs_f64() * 1000.0;
         perf_log!("[PERF]     {} wall={:.0}ms(main={:.0}ms,sub={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
-            session.source_path.file_name().unwrap_or_default().to_string_lossy(),
+            short_file_tag(&session.source_path),
             wall, main_elapsed, sub_elapsed,
             (t3-t2).as_secs_f64()*1000.0, (std::time::Instant::now()-t3).as_secs_f64()*1000.0,
             file_size as f64 / 1e6);
@@ -415,6 +533,7 @@ pub(crate) fn extract_usage_incremental(
 
 /// 增量解析 subagent：只解析新增或变化的 subagent 文件
 /// 返回 (增量 messages, 当前所有 subagent 文件状态)
+#[allow(dead_code)]
 pub(crate) fn extract_subagent_incremental(
     session: &SessionMeta,
     cached_subagent_files: &HashMap<String, SubagentFileState>,
@@ -571,15 +690,7 @@ fn parse_file_sequential(
             }
         }
         if let Some((id, entry)) = process_assistant_line(line, &tree) {
-            let should_insert = match messages.get(&id) {
-                None => true,
-                Some(old) => {
-                    (!old.has_stop && entry.has_stop)
-                        || (old.has_stop == entry.has_stop
-                            && entry.usage.output_tokens > old.usage.output_tokens)
-                }
-            };
-            if should_insert {
+            if should_replace(messages.get(&id), &entry) {
                 messages.insert(id, entry);
             }
         }
@@ -721,15 +832,7 @@ fn merge_pairs(
     pairs: Vec<(String, MsgEntry)>,
 ) {
     for (id, entry) in pairs {
-        let should_insert = match messages.get(&id) {
-            None => true,
-            Some(old) => {
-                (!old.has_stop && entry.has_stop)
-                    || (old.has_stop == entry.has_stop
-                        && entry.usage.output_tokens > old.usage.output_tokens)
-            }
-        };
-        if should_insert {
+        if should_replace(messages.get(&id), &entry) {
             messages.insert(id, entry);
         }
     }
@@ -781,15 +884,7 @@ fn parse_bytes_into_messages(
             Err(_) => continue,
         };
         if let Some((id, entry)) = process_assistant_line(line_str, &tree) {
-            let should_insert = match messages.get(&id) {
-                None => true,
-                Some(old) => {
-                    (!old.has_stop && entry.has_stop)
-                        || (old.has_stop == entry.has_stop
-                            && entry.usage.output_tokens > old.usage.output_tokens)
-                }
-            };
-            if should_insert {
+            if should_replace(messages.get(&id), &entry) {
                 messages.insert(id, entry);
             }
         }
@@ -802,15 +897,7 @@ fn merge_msg_entries(
     new_entries: MsgMap,
 ) {
     for (id, entry) in new_entries {
-        let should_insert = match messages.get(&id) {
-            None => true,
-            Some(old) => {
-                (!old.has_stop && entry.has_stop)
-                    || (old.has_stop == entry.has_stop
-                        && entry.usage.output_tokens > old.usage.output_tokens)
-            }
-        };
-        if should_insert {
+        if should_replace(messages.get(&id), &entry) {
             messages.insert(id, entry);
         }
     }
@@ -1105,71 +1192,73 @@ fn extract_primary_request(text: &str) -> Option<String> {
     }
 }
 
-fn scan_compact_summary(path: &Path) -> Option<String> {
-    for line in std::io::BufReader::new(std::fs::File::open(path).ok()?)
-        .lines()
-        .take(500)
-    {
-        let line = line.ok()?;
-        if !line.contains("isCompactSummary") {
-            continue;
-        }
-        if let Ok(cl) = sonic_rs::from_str::<ClaudeLine>(&line) {
-            if cl.is_compact_summary == Some(true) {
-                if let Some(title) = cl
-                    .message
-                    .as_ref()
-                    .and_then(|m| extract_raw_text(&m.content))
-                    .and_then(|r| extract_primary_request(&r))
-                {
-                    return Some(title);
-                }
+/// 从字节数据中提取前 n 行（零拷贝，基于 memchr SIMD 加速换行符定位）
+/// 返回 Vec<&[u8]> 引用原始数据，避免 String 分配开销
+/// 注意：不能改为 Vec<String>，实测 String 分配导致 scan_sessions 从 30ms 退化到 100ms
+fn extract_head_lines(data: &[u8], n: usize) -> Vec<&[u8]> {
+    let mut lines = Vec::with_capacity(n.min(64));
+    let mut start = 0;
+    for pos in memchr::memchr_iter(b'\n', data) {
+        // 去除行尾 \r
+        let end = if pos > start && data[pos - 1] == b'\r' { pos - 1 } else { pos };
+        let line = &data[start..end];
+        if !line.is_empty() {
+            lines.push(line);
+            if lines.len() >= n {
+                break;
             }
+        }
+        start = pos + 1;
+    }
+    // 最后一段（无换行结尾）
+    if lines.len() < n && start < data.len() {
+        let end = data.len();
+        let end = if end > start && data[end - 1] == b'\r' { end - 1 } else { end };
+        let line = &data[start..end];
+        if !line.is_empty() {
+            lines.push(line);
         }
     }
-    None
+    lines
 }
 
-fn read_head_tail(path: &Path, head_n: usize, tail_n: usize) -> Result<(Vec<String>, Vec<String>)> {
-    let file = std::fs::File::open(path)?;
-    let file_size = file.metadata()?.len();
-    let head: Vec<String> = std::io::BufReader::new(&file)
-        .lines()
-        .map_while(Result::ok)
-        .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty())
-        .take(head_n)
-        .collect();
-    let tail = if file_size > 0 {
-        let seek_pos = file_size.saturating_sub(65536);
-        let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
-        reader.seek(SeekFrom::Start(seek_pos))?;
-        let mut buf: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-        for (i, line) in reader.lines().enumerate() {
-            let trimmed = line?.trim_end().to_string();
-            if (seek_pos > 0 && i == 0) || trimmed.is_empty() {
-                continue;
-            }
-            buf.push_back(trimmed);
-            if buf.len() > tail_n {
-                buf.pop_front();
-            }
+/// 从字节数据尾部区域提取最后 n 行（零拷贝）
+/// data 通常是文件末尾 64KB，memchr 全量 collect 在 64KB 上约 10μs，可忽略
+/// 注意：不能改为 Vec<String>，同 extract_head_lines
+fn extract_tail_lines(data: &[u8], n: usize) -> Vec<&[u8]> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let nl_positions: Vec<usize> = memchr::memchr_iter(b'\n', data).collect();
+    if nl_positions.is_empty() {
+        let line = if data.last() == Some(&b'\r') { &data[..data.len() - 1] } else { data };
+        if line.is_empty() { return Vec::new(); }
+        return vec![line];
+    }
+
+    let mut lines = Vec::with_capacity(n.min(32));
+    let mut i = nl_positions.len();
+    while lines.len() < n && i > 0 {
+        let line_end = nl_positions[i - 1];
+        let line_end = if line_end > 0 && data[line_end - 1] == b'\r' { line_end - 1 } else { line_end };
+        let line_start = if i >= 2 { nl_positions[i - 2] + 1 } else { 0 };
+        let line = &data[line_start..line_end];
+        if !line.is_empty() {
+            lines.push(line);
         }
-        buf.into()
-    } else {
-        Vec::new()
-    };
-    Ok((head, tail))
+        i -= 1;
+    }
+    lines.reverse();
+    lines
 }
 
 fn file_mtime_ms(meta: &std::fs::Metadata) -> i64 {
     super::meta_mtime_ms(meta)
 }
 fn walkdir_entries(dir: &Path) -> Result<Vec<(PathBuf, std::fs::Metadata)>> {
-    Ok(super::walkdir_files(dir)?
-        .into_iter()
-        .filter_map(|p| std::fs::symlink_metadata(&p).ok().map(|m| (p, m)))
-        .collect())
+    // walkdir_files 已返回 (PathBuf, Metadata)，直接透传
+    super::walkdir_files(dir)
 }
 
 #[cfg(test)]

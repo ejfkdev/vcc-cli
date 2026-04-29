@@ -1,0 +1,26 @@
+[tool]
+name = "amp"
+config_dir = "~/.local/share/amp"
+
+[session]
+format = "json"
+path = "threads"
+glob = "T-*.json"
+resume_command = "amp --resume {id}"
+
+[session.json]
+strategy = "messages"
+session_id_path = "id"
+created_at_path = "created"
+messages_path = "messages"
+message_filter = { role = "assistant" }
+model_path = "usage.model"
+default_model = "amp"
+cost_path = "usage.credits"
+timestamp_path = "usageLedger.events.0.timestamp"
+
+[session.json.token_map]
+input = "usage.inputTokens"
+output = "usage.outputTokens"
+cache_read = "usage.cacheReadInputTokens"
+cache_creation = "usage.cacheCreationInputTokens"

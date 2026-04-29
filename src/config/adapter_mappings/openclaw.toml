@@ -1,0 +1,26 @@
+[tool]
+name = "openclaw"
+config_dir = "~/.openclaw"
+
+[session]
+format = "jsonl"
+path = ""
+resume_command = "openclaw --resume {id}"
+
+[session.jsonl]
+filter = { type = "message", role = "assistant" }
+model_path = "message.model"
+default_model = "openclaw"
+timestamp_path = "timestamp"
+cost_path = "message.usage.cost.total"
+model_change_path = "data.modelId"
+
+[session.jsonl.token_map]
+input = "message.usage.input"
+output = "message.usage.output"
+cache_read = "message.usage.cacheRead"
+cache_creation = "message.usage.cacheWrite"
+
+[session.jsonl.model_change_filter]
+type = "custom"
+customType = "model-snapshot"

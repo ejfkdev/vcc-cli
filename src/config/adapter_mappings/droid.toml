@@ -63,3 +63,22 @@ manifest_dir = ".factory-plugin"
 manifest_file = "plugin.json"
 install_dir = "plugins/cache"
 marketplace_key = "extraKnownMarketplaces"
+
+[session]
+format = "json"
+path = "sessions"
+glob = "*.settings.json"
+resume_command = "droid --resume {id}"
+
+[session.json]
+strategy = "flat"
+session_id_path = ""
+model_path = "model"
+default_model = "droid"
+model_normalize = "strip_prefix,strip_brackets,lowercase,dot_to_dash,collapse_dashes"
+
+[session.json.token_map]
+input = "tokenUsage.inputTokens"
+output = "tokenUsage.outputTokens"
+cache_read = "tokenUsage.cacheReadTokens"
+cache_creation = "tokenUsage.cacheCreationTokens"

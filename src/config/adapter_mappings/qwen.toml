@@ -1,0 +1,19 @@
+[tool]
+name = "qwen"
+config_dir = "~/.qwen"
+
+[session]
+format = "jsonl"
+path = "projects"
+resume_command = "qwen chat --resume {id}"
+
+[session.jsonl]
+filter = { type = "assistant" }
+model_path = "model"
+default_model = "qwen-max"
+timestamp_path = "timestamp"
+
+[session.jsonl.token_map]
+input = "usageMetadata.promptTokenCount"
+output = "usageMetadata.candidatesTokenCount"
+cache_read = "usageMetadata.cachedContentTokenCount"

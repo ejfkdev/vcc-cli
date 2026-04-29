@@ -1,0 +1,8 @@
+[tool]
+name = "roocode"
+config_dir = "~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline"
+
+[session]
+format = "roo_kilo"
+path = "tasks"
+resume_command = "roo --resume {id}"

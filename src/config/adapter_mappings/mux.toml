@@ -1,0 +1,22 @@
+[tool]
+name = "mux"
+config_dir = "~/.mux"
+
+[session]
+format = "json"
+path = "sessions"
+glob = "session-usage.json"
+resume_command = "mux --resume {id}"
+
+[session.json]
+strategy = "by_model"
+session_id_path = ""
+by_model_path = "byModel"
+by_model_provider_prefix = true
+by_model_timestamp_path = "lastRequest.timestamp"
+
+[session.json.by_model_token_map]
+input = "input.tokens"
+output = "output.tokens"
+cache_read = "cached.tokens"
+cache_creation = "cacheCreate.tokens"

@@ -1,0 +1,7 @@
+[tool]
+name = "cursor"
+config_dir = "~/.config/tokscale"
+
+[session]
+format = "cursor_csv"
+path = "cursor-cache"

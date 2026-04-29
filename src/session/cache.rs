@@ -121,6 +121,11 @@ pub(crate) struct CachedUsageData {
     /// 用于检测缓存数据是否完整：如果缓存是范围解析但请求全量，需要按 Miss 处理
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parsed_range_start_ms: Option<i64>,
+    /// 通用工具状态（供各工具的增量解析使用）
+    /// JSONL 工具: {"last_byte_offset": N, "current_model": "..."}
+    /// SQLite 工具: {"last_rowid": N}
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_state: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -193,7 +198,7 @@ pub(crate) enum CacheStatus {
 }
 
 impl JsonCache for UnifiedCache {
-    const VERSION: u32 = 10;
+    const VERSION: u32 = 11;
     const FILE_NAME: &'static str = "session-cache.json";
     fn version(&self) -> u32 {
         self.version

@@ -1,0 +1,24 @@
+[tool]
+name = "hermes"
+config_dir = "~/.hermes"
+
+[session]
+format = "sqlite"
+path = "state.db"
+data_dir_strategy = "env_var"
+data_dir_env_var = "HERMES_HOME"
+data_dir_fallback = ".hermes"
+
+[session.sqlite]
+session_query = "SELECT id, model, started_at, message_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, estimated_cost_usd, actual_cost_usd FROM sessions WHERE model IS NOT NULL AND model != '' AND (input_tokens > 0 OR output_tokens > 0 OR actual_cost_usd > 0 OR estimated_cost_usd > 0)"
+usage_query = "SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, actual_cost_usd, estimated_cost_usd, started_at FROM sessions WHERE id = '{session_id}'"
+model_column = "model"
+default_model = "hermes"
+cost_column = "actual_cost_usd"
+cost_column_fallback = "estimated_cost_usd"
+
+[session.sqlite.column_map]
+input = "input_tokens"
+output = "output_tokens"
+cache_read = "cache_read_tokens"
+cache_creation = "cache_write_tokens"

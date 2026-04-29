@@ -1,0 +1,13 @@
+[tool]
+name = "crush"
+config_dir = "~/.local/share/crush"
+
+[session]
+format = "sqlite"
+path = "crush.db"
+
+[session.sqlite]
+session_query = "SELECT id, title, created_at, updated_at FROM sessions WHERE parent_session_id IS NULL AND (message_count > 0 OR cost > 0)"
+usage_query = "SELECT s.id, s.cost, s.updated_at, s.created_at FROM sessions s WHERE s.id = '{session_id}' AND s.parent_session_id IS NULL"
+default_model = "session-total"
+cost_column = "cost"

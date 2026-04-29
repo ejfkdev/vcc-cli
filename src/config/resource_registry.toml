@@ -509,7 +509,7 @@ extra_dirs = ["profiles"]
 # ══════════════════════════════════════════════════════════
 
 [tools]
-adapters = ["claude", "codex", "gemini", "opencode", "droid", "kimi", "aider"]
+adapters = ["claude", "codex", "copilot", "crush", "cursor", "droid", "gemini", "hermes", "kilo", "kilocode", "kimi", "mux", "amp", "opencode", "openclaw", "pi", "qwen", "roocode", "aider"]
 
 # ══════════════════════════════════════════════════════════
 # 数据源名称列表

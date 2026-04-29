@@ -281,8 +281,8 @@ fn save_usage_cache_entry(
             existing.cache_creation_1h_tokens += u.usage.cache_creation_1h_tokens;
             existing.web_search_requests += u.usage.web_search_requests;
             existing.request_count += u.request_count;
-            if u.cost_usd.is_some() {
-                existing.cost_usd = u.cost_usd;
+            if let Some(c) = u.cost_usd {
+                existing.cost_usd = Some(existing.cost_usd.unwrap_or(0.0) + c);
             }
         } else {
             entries.push(CachedDailyUsage::from_usage_summary(u));
@@ -301,6 +301,7 @@ fn save_usage_cache_entry(
             codex_current_model: None,
             subagent_files: HashMap::new(),
             parsed_range_start_ms: None,
+            tool_state: None,
         },
     );
 }
@@ -836,11 +837,26 @@ fn scan_all_sessions(
     min_mtime_ms: Option<i64>,
 ) -> Vec<session::model::SessionMeta> {
     let mut all = Vec::new();
+    let mut slow_tools: Vec<(&str, u128)> = Vec::new();
     for mapping in mappings {
+        let t = std::time::Instant::now();
         match session::scan_sessions(mapping, min_mtime_ms) {
-            Ok(s) => all.extend(s),
+            Ok(s) => {
+                let elapsed = t.elapsed().as_micros();
+                if elapsed > 5000 {
+                    slow_tools.push((mapping.tool.name.as_str(), elapsed));
+                }
+                all.extend(s)
+            }
             Err(e) => eprintln!("  warning: failed to scan {}: {}", mapping.tool.name, e),
         }
+    }
+    if !slow_tools.is_empty() {
+        let details: Vec<String> = slow_tools
+            .iter()
+            .map(|(n, us)| format!("{}={:.1}ms", n, *us as f64 / 1000.0))
+            .collect();
+        perf_log!("[PERF]   2.slow_scans: {}", details.join(", "));
     }
     all
 }
