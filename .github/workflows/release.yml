@@ -72,9 +72,8 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           sudo apt-get update && sudo apt-get install -y musl-tools
-          # Install aarch64 musl cross-compiler from musl-cross-make
-          MUSL_CC_VERSION="13b4744ce468c6e0c0e4fb4a8c0f97face645361"
-          curl -sL "https://github.com/nicm/musl-cross-make/releases/download/${MUSL_CC_VERSION}/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz
+          # Install aarch64 musl cross-compiler from musl.cc
+          curl -sL "https://musl.cc/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz
           sudo tar xf musl-cross.tgz -C /opt
           echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
 
