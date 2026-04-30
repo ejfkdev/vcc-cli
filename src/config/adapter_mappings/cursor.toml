@@ -1,6 +1,7 @@
 [tool]
 name = "cursor"
-config_dir = "~/.config/tokscale"
+# Cursor usage data is exported via API and cached in VCC's own config dir
+config_dir = "~/.config/VibeCodingControl"
 
 [session]
 format = "cursor_csv"

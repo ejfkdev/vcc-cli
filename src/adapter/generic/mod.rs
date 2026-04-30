@@ -379,14 +379,18 @@ impl Adapter for GenericAdapter {
                     if !dry_run {
                         let t = skills_dir.join(name);
                         let r = if t.is_symlink() {
-                            std::fs::remove_file(&t)
+                            if t.is_dir() {
+                                std::fs::remove_dir(&t)
+                            } else {
+                                std::fs::remove_file(&t)
+                            }
                         } else if t.is_dir() {
                             std::fs::remove_dir_all(&t)
                         } else {
                             continue;
                         };
                         if let Err(e) = r {
-                            eprintln!("warning: failed to remove '{}': {}", t.display(), e);
+                            crate::cli::output::warn(&format!("failed to remove '{}': {}", t.display(), e));
                         }
                     }
                     continue;
@@ -489,7 +493,7 @@ impl Adapter for GenericAdapter {
         }
         let applied = load_each::<Agent, _>(store, "agent", &profile.agents.enabled, |agent| {
             if let Err(e) = write_agent_file(&agent, &agents_dir, is_yaml, ext, dry_run) {
-                eprintln!("warning: failed to write agent '{}': {}", agent.name, e);
+                crate::cli::output::warn(&format!("failed to write agent '{}': {}", agent.name, e));
             }
         });
         print_apply_status("agent", applied, &agents_dir, dry_run);
@@ -558,7 +562,7 @@ impl Adapter for GenericAdapter {
                 let (is_yaml, ext) = self.agent_format_info();
                 let applied = load_each::<Agent, _>(store, "agent", names, |agent| {
                     if let Err(e) = write_agent_file(&agent, &agents_dir, is_yaml, ext, dry_run) {
-                        eprintln!("warning: failed to write agent '{}': {}", agent.name, e);
+                        crate::cli::output::warn(&format!("failed to write agent '{}': {}", agent.name, e));
                     }
                 });
                 if !dry_run && applied > 0 {

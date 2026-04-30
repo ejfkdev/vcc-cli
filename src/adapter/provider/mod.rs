@@ -157,7 +157,7 @@ pub(crate) fn sync_provider_upsert<C, M>(
                     return;
                 }
                 if let Err(e) = store.save_resource(&merged) {
-                    eprintln!("warning: failed to save provider '{}': {}", name, e);
+                    crate::cli::output::warn(&format!("failed to save provider '{}': {}", name, e));
                 }
             }
             result.updated.push(SyncItem::new(category, name));
@@ -168,7 +168,7 @@ pub(crate) fn sync_provider_upsert<C, M>(
         } else {
             if !dry_run {
                 if let Err(e) = store.save_resource(new_provider) {
-                    eprintln!("warning: failed to save provider '{}': {}", name, e);
+                    crate::cli::output::warn(&format!("failed to save provider '{}': {}", name, e));
                 }
             }
             result.created.push(SyncItem::new(category, name));

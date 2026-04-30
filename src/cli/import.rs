@@ -381,7 +381,7 @@ pub(crate) fn run_ccswitch(dry_run: bool) -> Result<()> {
 
 fn run_ccswitch_inner(store: &TomlStore, dry_run: bool, verbose: bool) -> Result<ImportResult> {
     let source = CcSwitchSource::new().ok_or_else(|| {
-        anyhow::anyhow!("cc-switch database not found at ~/.cc-switch/cc-switch.db")
+        anyhow::anyhow!("cc-switch database not found")
     })?;
     if verbose && !is_json_mode() {
         println!(
@@ -492,7 +492,7 @@ fn run_cherry_studio_inner(
 ) -> Result<ImportResult> {
     let source = CherryStudioSource::new().ok_or_else(|| {
         anyhow::anyhow!(
-            "Cherry Studio data not found (looked in ~/Library/Application Support/CherryStudio/)"
+            "Cherry Studio data not found"
         )
     })?;
     if verbose && !is_json_mode() {

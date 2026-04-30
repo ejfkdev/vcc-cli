@@ -96,3 +96,8 @@ pub(crate) fn print_dry_run_banner(dry_run: bool) {
         println!("=== DRY RUN (no changes will be made) ===\n");
     }
 }
+
+/// 输出警告消息到 stderr（统一格式）
+pub(crate) fn warn(msg: &str) {
+    eprintln!("warning: {}", msg);
+}

@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn test_path_separator_in_resource_paths() {
         // Verify path construction works correctly on all platforms
-        let root = std::path::PathBuf::from("/tmp/VibeCodingControl");
+        let root = std::env::temp_dir().join("VibeCodingControl");
         let resource_path = root.join("provider").join("my-provider-5700f33c.toml");
         // On all platforms, the path should end with the correct structure
         assert!(resource_path.to_string_lossy().contains("provider"));

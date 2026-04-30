@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/vcc?style=flat-square)](https://crates.io/crates/vcc)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/ejfkdev/vcc-cli/blob/main/LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/ejfkdev/vcc-cli/ci.yml?style=flat-square&branch=main)](https://github.com/ejfkdev/vcc-cli/actions)
 [![GitHub Release](https://img.shields.io/github/v/release/ejfkdev/vcc-cli?style=flat-square)](https://github.com/ejfkdev/vcc-cli/releases/latest)
 
@@ -14,9 +14,30 @@ VCC lets you define your AI coding tool configuration once — providers, MCP se
 
 ## Install
 
-### From GitHub Releases
+### macOS / Linux
 
-Download the latest binary for your platform from [Releases](https://github.com/ejfkdev/vcc-cli/releases/latest).
+```bash
+curl -fsSL https://raw.githubusercontent.com/ejfkdev/vcc-cli/main/install.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/ejfkdev/vcc-cli/main/install.ps1 | iex
+```
+
+### Homebrew
+
+```bash
+brew tap ejfkdev/tap
+brew install vcc
+```
+
+### Cargo
+
+```bash
+cargo install vcc
+```
 
 ### From source
 
@@ -30,13 +51,25 @@ cargo install --path .
 
 | Tool | Config Format | Resources |
 |------|--------------|-----------|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | JSON (JSONC) | Provider, MCP, Hook, Env, Skill, Agent, Prompt, Plugin |
-| [Codex CLI](https://github.com/openai/codex) | JSON + TOML | Provider, MCP |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | JSON + YAML | Provider, MCP, Env, Skill |
-| [OpenCode](https://github.com/opencode-ai/opencode) | TOML | Provider, MCP, Hook, Skill, Prompt |
-| [Aider](https://github.com/Aider-AI/aider) | YAML | Provider |
-| [Kimi](https://github.com/anthropics/kimi) | JSON + YAML | Provider, MCP, Hook, Skill |
-| [Droid](https://github.com/nicepkg/droid) | JSON | Provider, MCP, Plugin, Prompt |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | JSON (JSONC) | Provider, MCP, Hook, Env, Agent, Prompt, Plugin |
+| [Codex CLI](https://github.com/openai/codex) | JSON + TOML | Provider, MCP, Prompt, Plugin |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | JSON + .env | Provider, MCP, Hook, Env, Prompt, Plugin |
+| [OpenCode](https://github.com/opencode-ai/opencode) | JSON (JSONC) | Provider, MCP, Prompt, Plugin |
+| [Droid](https://github.com/nicepkg/droid) | JSON | Provider, MCP, Prompt, Plugin |
+| [Kimi](https://github.com/MoonshotAI/kimi-cli) | JSON + TOML + YAML | Provider, MCP, Hook, Agent, Prompt, Plugin |
+| [Aider](https://github.com/paul-gauthier/aider) | YAML | Provider |
+| [Cursor](https://cursor.com) | CSV | Session |
+| [Copilot](https://github.com/features/copilot) | JSONL | Session |
+| [Amp](https://ampcode.com) | JSON | Session |
+| [RooCode](https://roocode.com) | JSON | Session |
+| [KiloCode](https://kilocode.com) | JSON | Session |
+| [Kilo](https://github.com/nicepkg/kilo) | SQLite | Session |
+| [Crush](https://github.com/charmbracelet/crush) | SQLite | Session |
+| [Hermes](https://github.com/NousResearch/hermes-agent) | SQLite | Session |
+| [Qwen](https://github.com/QwenLM/qwen-code) | JSONL | Session |
+| [Pi](https://pi.ai) | JSONL | Session |
+| [OpenClaw](https://github.com/openclaw/openclaw) | JSONL | Session |
+| [Mux](https://mux.com) | JSON | Session |
 
 ## Quick Start
 
@@ -91,10 +124,10 @@ Each resource command supports `list`, `add`, `remove`, and `show` subcommands. 
 
 ## How It Works
 
-VCC maintains a **resource registry** (`~/.vcc/registry/`) with TOML files for each resource. When you `apply`, VCC reads the registry and writes the correct format (JSON/TOML/YAML) to each tool's config directory.
+VCC maintains a **resource registry** (`~/.config/VibeCodingControl/registry/`) with TOML files for each resource. When you `apply`, VCC reads the registry and writes the correct format (JSON/TOML/YAML) to each tool's config directory.
 
 ```
-~/.vcc/registry/
+~/.config/VibeCodingControl/registry/
   provider/
     my-openai.toml
     my-anthropic.toml

@@ -20,7 +20,10 @@ static SUB_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
         .num_threads((cores * 2 / 5).max(4))
         .build()
-        .unwrap()
+        .unwrap_or_else(|e| {
+            crate::cli::output::warn(&format!("SUB_POOL init failed: {e}, falling back to 2 threads"));
+            rayon::ThreadPoolBuilder::new().num_threads(2).build().expect("minimal thread pool must succeed")
+        })
 });
 
 /// 从 JSONL 行字节中快速提取时间戳（毫秒），用于 range_start_ms 提前终止判断
@@ -1283,7 +1286,6 @@ fn walkdir_entries(dir: &Path) -> Result<Vec<(PathBuf, std::fs::Metadata)>> {
 #[cfg(test)]
 mod test_unknown_fields {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_sonic_unknown_fields() {
@@ -1308,20 +1310,4 @@ mod test_unknown_fields {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_mmap_vs_sequential() {
-        let path = std::path::Path::new("/Users/wudi/.claude/projects/-Users-wudi-Documents-project-zread-ai-ext/d09ec20e-2a1d-4261-8f0b-36de5d724101.jsonl");
-        if !path.exists() {
-            eprintln!("Test file not found, skipping");
-            return;
-        }
-
-        let mut seq_messages: MsgMap = HashMap::new();
-        parse_file_sequential(path, 0, &mut seq_messages, 0, None).unwrap();
-
-        let mut mmap_messages: MsgMap = HashMap::new();
-        parse_file_tail_mmap(path, &mut mmap_messages, &[], None, true, "test").unwrap();
-
-        assert_eq!(mmap_messages.len(), seq_messages.len(), "mmap and sequential should find same number of entries");
-    }
 }

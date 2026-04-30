@@ -219,7 +219,7 @@ fn build_config_command() -> clap::Command {
 
 fn build_session_command() -> clap::Command {
     clap::Command::new("session").about("管理会话").after_help("Examples:\n  vcc session list                             # 列出所有会话\n  vcc session list -t claude                   # 只列出 claude 会话\n  vcc session show abc123                      # 查看会话详情\n  vcc session remove abc123                    # 删除会话").subcommand_required(true)
-        .subcommand(clap::Command::new("list").about("列出会话").arg(clap::Arg::new("tool").short('t').long("tool").help("目标工具 (claude/codex/gemini/opencode/kimi)")))
+        .subcommand(clap::Command::new("list").about("列出会话").arg(clap::Arg::new("tool").short('t').long("tool").help("目标工具 (如 claude, codex, gemini 等)")))
         .subcommand(clap::Command::new("show").about("显示会话详情").arg(clap::Arg::new("id").required(true).help("会话 ID")).arg(clap::Arg::new("tool").short('t').long("tool").help("工具名称")))
         .subcommand(clap::Command::new("remove").about("删除会话").arg(clap::Arg::new("id").required(true).help("会话 ID")).arg(clap::Arg::new("tool").short('t').long("tool").help("工具名称")))
 }

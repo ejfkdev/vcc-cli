@@ -176,11 +176,11 @@ pub(crate) fn handle_subcommand(matches: &clap::ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list", m)) => list_sessions(m.get_one::<String>("tool").map(|s| s.as_str())),
         Some(("show", m)) => show_session(
-            m.get_one::<String>("id").unwrap(),
+            m.get_one::<String>("id").expect("id is required"),
             m.get_one::<String>("tool").map(|s| s.as_str()),
         ),
         Some(("remove", m)) => delete_session(
-            m.get_one::<String>("id").unwrap(),
+            m.get_one::<String>("id").expect("id is required"),
             m.get_one::<String>("tool").map(|s| s.as_str()),
         ),
         _ => bail!("unknown session subcommand. Run 'vcc session --help' for usage."),
@@ -233,7 +233,7 @@ fn extract_session_tokens(
             Ok(r) => {
                 save_usage_cache_entry(&mut cache, session, &r.usages);
                 if let Err(e) = cache.save() {
-                    eprintln!("warning: failed to save usage cache: {}", e);
+                    crate::cli::output::warn(&format!("failed to save usage cache: {}", e));
                 }
                 r.usages
             }
@@ -616,7 +616,7 @@ pub(crate) fn show_usage(
                 "request_count": r.request_count,
             });
             let cost = r.cost.to_json();
-            obj.as_object_mut().unwrap().insert("cost".into(), cost);
+            obj.as_object_mut().expect("json! object").insert("cost".into(), cost);
             obj
         }).collect::<Vec<_>>()));
     } else {
@@ -829,7 +829,7 @@ fn update_session_cache(sessions: &[session::model::SessionMeta]) {
     }
     c.purge_missing();
     if let Err(e) = c.save() {
-        eprintln!("warning: failed to save session cache: {}", e);
+        crate::cli::output::warn(&format!("failed to save session cache: {}", e));
     }
 }
 fn scan_all_sessions(

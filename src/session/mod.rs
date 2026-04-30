@@ -249,7 +249,7 @@ pub(crate) fn extract_all_usage(
     if cache_dirty {
         cache.purge_missing();
         if let Err(e) = cache.save() {
-            eprintln!("warning: failed to save cache: {}", e);
+            crate::cli::output::warn(&format!("failed to save cache: {}", e));
         }
     }
     perf_log!("[PERF]   3d.cache_save+merge: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
@@ -259,10 +259,9 @@ pub(crate) fn extract_all_usage(
 
 /// 按日期过滤 UsageSummary
 fn filter_by_date(usages: Vec<UsageSummary>, start_ms: Option<i64>) -> Vec<UsageSummary> {
-    if start_ms.is_none() {
+    let Some(start) = start_ms else {
         return usages;
-    }
-    let start = start_ms.unwrap();
+    };
     usages
         .into_iter()
         .filter(|u| {
@@ -403,7 +402,7 @@ fn incremental_extract(
         }
         // 通用 JSONL 管线增量解析
         _ if mapping.session.format == "jsonl" && mapping.session.jsonl.is_some() => {
-            let config = mapping.session.jsonl.as_ref().unwrap();
+            let config = mapping.session.jsonl.as_ref().expect("checked is_some above");
             // 从 tool_state 恢复增量状态（current_model）
             let prev_state: jsonl_generic::JsonlIncrementalState = cached
                 .tool_state

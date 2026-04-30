@@ -1,5 +1,5 @@
 /// Cursor CSV 解析模块
-/// 数据来源：Cursor API 导出的 CSV 文件（缓存于 ~/.config/tokscale/cursor-cache/）
+/// 数据来源：Cursor API 导出的 CSV 文件（缓存于 ~/.config/VibeCodingControl/cursor-cache/）
 /// 三种 CSV 格式版本：
 /// - v1: Date,Model,Input(w/CacheWrite),Input(w/oCacheWrite),CacheRead,OutputTokens,TotalTokens,Cost,CostToYou
 /// - v2: Date,Kind,Model,MaxMode,Input(w/CacheWrite),Input(w/oCacheWrite),CacheRead,OutputTokens,TotalTokens,Cost

@@ -601,7 +601,7 @@ mod tests {
         let mapping = crate::adapter::mapping::ToolMapping {
             tool: crate::adapter::mapping::ToolInfo {
                 name: "test".into(),
-                config_dir: "/tmp/test-config".into(),
+                config_dir: std::env::temp_dir().join("test-config").to_string_lossy().into_owned(),
             },
             settings_path: Some("custom.json".into()),
             mcp: Default::default(),
@@ -632,7 +632,7 @@ mod tests {
         let mapping = crate::adapter::mapping::ToolMapping {
             tool: crate::adapter::mapping::ToolInfo {
                 name: "test".into(),
-                config_dir: "/tmp/test-config".into(),
+                config_dir: std::env::temp_dir().join("test-config").to_string_lossy().into_owned(),
             },
             settings_path: Some("my-settings.json".into()),
             mcp: Default::default(),

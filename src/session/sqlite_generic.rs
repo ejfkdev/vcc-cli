@@ -136,8 +136,8 @@ pub(crate) fn extract_usage(
         None => return Ok(ExtractResult { usages: Vec::new() }),
     };
 
-    // 替换 {session_id} 占位符
-    let query = usage_query.replace("{session_id}", &session.session_id);
+    // 使用参数化查询防止 SQL 注入
+    let query = usage_query.replace("{session_id}", "?1");
 
     let mut stmt = match conn.prepare(&query) {
         Ok(s) => s,
@@ -149,7 +149,7 @@ pub(crate) fn extract_usage(
 
     let mut entries: Vec<(String, TokenUsage, Option<f64>, i64)> = Vec::new();
 
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map([session.session_id.as_str()], |row| {
         // 动态读取列
         let col_names: Vec<String> = (0..row.as_ref().column_count())
             .filter_map(|i| row.as_ref().column_name(i).ok().map(|s| s.to_string()))
@@ -295,7 +295,7 @@ fn extract_from_columns(
             .and_then(|col| row.get(&col.to_lowercase()))
             .and_then(|s| s.parse::<f64>().ok());
         let cost = cost1.or(cost2);
-        if cost.is_none() || cost.unwrap() <= 0.0 {
+        if cost.as_ref().map_or(true, |&c| c <= 0.0) {
             return None;
         }
     }

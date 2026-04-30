@@ -334,8 +334,14 @@ pub(crate) fn clean_stale_dir_entries(dir: &Path, enabled: &std::collections::Ha
                 let path = entry.path();
                 // Only remove symlinks (vcc-managed), skip user-created directories
                 if path.is_symlink() {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        eprintln!("warning: failed to remove '{}': {}", path.display(), e);
+                    // On Windows, directory symlinks require remove_dir, not remove_file
+                    let remove_result = if path.is_dir() {
+                        std::fs::remove_dir(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    if let Err(e) = remove_result {
+                        crate::cli::output::warn(&format!("failed to remove '{}': {}", path.display(), e));
                     }
                 }
             }
@@ -391,20 +397,44 @@ pub(crate) fn link_skill(
 pub(crate) fn apply_skill_link(target: &Path, source: &Path, method: &str) -> Result<()> {
     if target.exists() || target.symlink_metadata().is_ok() {
         if target.is_symlink() {
-            std::fs::remove_file(target)?;
+            // On Windows, directory symlinks require remove_dir
+            if target.is_dir() {
+                std::fs::remove_dir(target)?;
+            } else {
+                std::fs::remove_file(target)?;
+            }
         } else {
             std::fs::remove_dir_all(target)?;
         }
     }
-    match method {
+    let effective_method = match method {
         "symlink" => {
-            std::os::unix::fs::symlink(source, target).with_context(|| {
-                format!(
-                    "failed to symlink {} -> {}",
-                    source.display(),
-                    target.display()
-                )
-            })?;
+            #[cfg(unix)]
+            {
+                "symlink"
+            }
+            #[cfg(windows)]
+            {
+                if std::os::windows::fs::symlink_dir(source, target).is_ok() {
+                    return Ok(());
+                }
+                "copy"
+            }
+        }
+        other => other,
+    };
+    match effective_method {
+        "symlink" => {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(source, target).with_context(|| {
+                    format!(
+                        "failed to symlink {} -> {}",
+                        source.display(),
+                        target.display()
+                    )
+                })?;
+            }
         }
         "copy" => {
             copy_dir_recursive(source, target)?;

@@ -323,7 +323,7 @@ impl DocTree {
         DocTree {
             root,
             format,
-            path: PathBuf::from("/tmp/test"),
+            path: std::env::temp_dir().join("test"),
         }
     }
 }

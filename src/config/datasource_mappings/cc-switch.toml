@@ -29,9 +29,13 @@ scan_dirs = [
 "official:claude" = "anthropic"
 "official:codex" = "openai"
 "official:gemini" = "google"
+"official:hermes" = "openai"
+"official:openclaw" = "anthropic"
 "cn_official:claude" = "anthropic"
 "cn_official:codex" = "openai"
 "cn_official:gemini" = "google"
+"cn_official:hermes" = "openai"
+"cn_official:openclaw" = "anthropic"
 
 # ══════════════════════════════════════════════════════════
 # MCP Server 类型映射：cc-switch type → VCC type
@@ -53,6 +57,8 @@ scan_dirs = [
 "enabled_codex" = "codex"
 "enabled_gemini" = "gemini"
 "enabled_opencode" = "opencode"
+"enabled_hermes" = "hermes"
+"enabled_openclaw" = "openclaw"
 
 # ══════════════════════════════════════════════════════════
 # common_config 键映射：settings 表中的 key → 工具名
@@ -63,6 +69,8 @@ scan_dirs = [
 "common_config_codex" = "codex"
 "common_config_opencode" = "opencode"
 "common_config_gemini" = "gemini"
+"common_config_hermes" = "hermes"
+"common_config_openclaw" = "openclaw"
 
 # ══════════════════════════════════════════════════════════
 # Provider env 已知变量列表（提取 extra_env 时排除）
@@ -85,6 +93,12 @@ all = ["OPENAI_API_KEY", "OPENAI_BASE_URL"]
 
 [env_known_keys.gemini]
 all = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_BASE_URL"]
+
+[env_known_keys.hermes]
+all = ["api_key", "base_url", "api_mode", "models", "rate_limit_delay"]
+
+[env_known_keys.openclaw]
+all = ["apiKey", "baseUrl", "api", "models"]
 
 # ══════════════════════════════════════════════════════════
 # MCP Server 已知字段列表（提取 extra 字段时排除）

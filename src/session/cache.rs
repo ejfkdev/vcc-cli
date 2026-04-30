@@ -367,7 +367,7 @@ pub(crate) fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     ranges.sort_by_key(|r| r.0);
     let mut merged = vec![ranges[0]];
     for (start, end) in ranges.into_iter().skip(1) {
-        let last = merged.last_mut().unwrap();
+        let last = merged.last_mut().expect("merged non-empty after skip(1)");
         if start <= last.1 {
             last.1 = last.1.max(end);
         } else {

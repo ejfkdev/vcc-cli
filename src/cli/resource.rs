@@ -964,7 +964,7 @@ mod tests {
     fn test_plugin_source_inference_local_path() {
         let mut plugin = crate::model::Plugin::new_with_name("test-local");
         plugin.config.source = "github".to_string();
-        plugin.config.path = Some("/tmp/plugin".to_string());
+        plugin.config.path = Some(std::env::temp_dir().join("plugin").to_string_lossy().into_owned());
         if plugin.config.source == "github"
             && plugin.config.path.is_some()
             && plugin.config.repo.is_none()

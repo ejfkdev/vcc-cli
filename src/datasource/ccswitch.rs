@@ -127,7 +127,7 @@ impl CcSwitchSource {
                 extra: HashMap::new(),
             };
             let meta: serde_json::Value = serde_json::from_str(&meta_json).unwrap_or_else(|e| {
-                eprintln!("warning: failed to parse provider meta JSON: {}", e);
+                crate::cli::output::warn(&format!("failed to parse provider meta JSON: {}", e));
                 serde_json::Value::default()
             });
             let description = meta
@@ -206,7 +206,7 @@ impl CcSwitchSource {
             );
             mcp_config.server_type = server_type;
             let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_else(|e| {
-                eprintln!("warning: failed to parse MCP tags JSON: {}", e);
+                crate::cli::output::warn(&format!("failed to parse MCP tags JSON: {}", e));
                 Vec::new()
             });
             let tool = build_enabled_overrides(&col_names, enabled_cols, &enabled_vals, || {
@@ -246,7 +246,7 @@ impl CcSwitchSource {
             return Ok(Vec::new());
         };
         let config: serde_json::Value = serde_json::from_str(&hooks_json).unwrap_or_else(|e| {
-            eprintln!("warning: failed to parse hooks JSON: {}", e);
+            crate::cli::output::warn(&format!("failed to parse hooks JSON: {}", e));
             serde_json::Value::default()
         });
         let Some(hooks_obj) = config.get("hooks").and_then(|v| v.as_object()) else {
@@ -695,6 +695,44 @@ fn extract_provider(
                 None,
                 extract_extra_env(env, known_keys),
                 None,
+                Vec::new(),
+            ))
+        }
+        "hermes" => {
+            let api_key = json_str(settings, "api_key");
+            let base_url = json_str_opt(settings, "base_url");
+            let default_model = settings
+                .get("models")
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Some((
+                api_key,
+                base_url,
+                None,
+                extract_extra_env(settings, config.env_known_keys_for("hermes")),
+                default_model,
+                Vec::new(),
+            ))
+        }
+        "openclaw" => {
+            let api_key = json_str(settings, "apiKey");
+            let base_url = json_str_opt(settings, "baseUrl");
+            let default_model = settings
+                .get("models")
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Some((
+                api_key,
+                base_url,
+                None,
+                extract_extra_env(settings, config.env_known_keys_for("openclaw")),
+                default_model,
                 Vec::new(),
             ))
         }
