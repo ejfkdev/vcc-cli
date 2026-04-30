@@ -43,7 +43,7 @@ jobs:
             artifact: vcc-x86_64-windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set version from tag
         shell: bash
@@ -127,7 +127,7 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/download-artifact@v4
         with:
@@ -152,7 +152,7 @@ jobs:
     needs: release
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: ejfkdev/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
