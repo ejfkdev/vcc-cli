@@ -14,8 +14,8 @@ ARCH="$(uname -m)"
 case "$OS-$ARCH" in
     Darwin-arm64)  ARTIFACT="vcc-aarch64-macos" ;;
     Darwin-x86_64) ARTIFACT="vcc-x86_64-macos" ;;
-    Linux-arm64)   ARTIFACT="vcc-aarch64-linux-musl" ;;
-    Linux-aarch64) ARTIFACT="vcc-aarch64-linux-musl" ;;
+    Linux-arm64)   ARTIFACT="vcc-aarch64-linux-gnu" ;;
+    Linux-aarch64) ARTIFACT="vcc-aarch64-linux-gnu" ;;
     Linux-x86_64)  ARTIFACT="vcc-x86_64-linux-musl" ;;
     *) echo "Unsupported platform: $OS-$ARCH" >&2; exit 1 ;;
 esac

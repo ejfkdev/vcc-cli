@@ -28,9 +28,10 @@ jobs:
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             artifact: vcc-aarch64-linux-gnu
-          - os: ubuntu-22.04
-            target: aarch64-unknown-linux-musl
-            artifact: vcc-aarch64-linux-musl
+          # ARM64 musl temporarily disabled — cross-compiler download unreliable
+          # - os: ubuntu-22.04
+          #   target: aarch64-unknown-linux-musl
+          #   artifact: vcc-aarch64-linux-musl
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: vcc-x86_64-linux-gnu
@@ -68,16 +69,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Install cross-compilation tools (Linux ARM64 musl)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          sudo apt-get update && sudo apt-get install -y musl-tools
-          # Install aarch64 musl cross-compiler from musl.cc
-          curl -sL "https://musl.cc/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz
-          sudo tar xf musl-cross.tgz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
-
-      - name: Install musl tools (x86_64)
+      - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           sudo apt-get update && sudo apt-get install -y musl-tools
@@ -175,12 +167,12 @@ jobs:
           curl -fsSL "${BASE_URL}/vcc-aarch64-macos" -o vcc-aarch64-macos
           curl -fsSL "${BASE_URL}/vcc-x86_64-macos" -o vcc-x86_64-macos
           curl -fsSL "${BASE_URL}/vcc-x86_64-linux-musl" -o vcc-x86_64-linux-musl
-          curl -fsSL "${BASE_URL}/vcc-aarch64-linux-musl" -o vcc-aarch64-linux-musl
+          curl -fsSL "${BASE_URL}/vcc-aarch64-linux-gnu" -o vcc-aarch64-linux-gnu
 
           ARM64_MAC_SHA=$(shasum -a 256 vcc-aarch64-macos | cut -d' ' -f1)
           X64_MAC_SHA=$(shasum -a 256 vcc-x86_64-macos | cut -d' ' -f1)
           X64_LINUX_SHA=$(shasum -a 256 vcc-x86_64-linux-musl | cut -d' ' -f1)
-          ARM64_LINUX_SHA=$(shasum -a 256 vcc-aarch64-linux-musl | cut -d' ' -f1)
+          ARM64_LINUX_SHA=$(shasum -a 256 vcc-aarch64-linux-gnu | cut -d' ' -f1)
 
           cat > vcc.rb <<FORMULA
           class Vcc < Formula
@@ -201,7 +193,7 @@ jobs:
 
             on_linux do
               if Hardware::CPU.arm?
-                url "${BASE_URL}/vcc-aarch64-linux-musl"
+                url "${BASE_URL}/vcc-aarch64-linux-gnu"
                 sha256 "${ARM64_LINUX_SHA}"
               else
                 url "${BASE_URL}/vcc-x86_64-linux-musl"
@@ -219,7 +211,7 @@ jobs:
               end
               on_linux do
                 if Hardware::CPU.arm?
-                  bin.install "vcc-aarch64-linux-musl" => "vcc"
+                  bin.install "vcc-aarch64-linux-gnu" => "vcc"
                 else
                   bin.install "vcc-x86_64-linux-musl" => "vcc"
                 end
