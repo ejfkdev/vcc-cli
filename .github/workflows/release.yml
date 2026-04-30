@@ -73,6 +73,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y musl-tools
 
+      - name: Install musl cross-compiler (ARM64 musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -84,7 +89,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             curl -sL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-win64.zip" -o upx.zip
             unzip -o upx.zip
-            cp "upx-${UPX_VERSION}-win64/upx.exe" /usr/local/bin/
+            cp "upx-${UPX_VERSION}-win64/upx.exe" "$HOME/.cargo/bin/"
           else
             curl -sL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" -o upx.tar.xz
             tar xf upx.tar.xz

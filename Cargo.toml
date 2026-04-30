@@ -27,7 +27,7 @@ twox-hash = { version = "2", features = ["xxhash3_64"] }
 md-5 = "0.10"
 nanoid = "0.4"
 chrono = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sonic-rs = "0.5.8"
 rayon = "1.12.0"
 memmap2 = "0.9"
@@ -40,12 +40,4 @@ opt-level = 3
 lto = "thin"
 strip = true
 opt-level = "s"
-codegen-units = 1
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "fat"
-strip = true
-opt-level = "z"
 codegen-units = 1
