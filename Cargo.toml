@@ -20,7 +20,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 dirs = "6"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 rusty-leveldb = "1.0"
 regex = "1"
 twox-hash = { version = "2", features = ["xxhash3_64"] }
