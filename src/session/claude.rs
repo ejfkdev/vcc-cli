@@ -488,14 +488,32 @@ pub(crate) fn extract_usage(
     let last_active_at = session.last_active_at;
     let file_size = session.file_size;
 
-    // 先解析 main（独占全局 rayon），再解析 subagent（独立线程池）
-    let mut messages: MsgMap = HashMap::new();
-    let fbo = parse_file_into_messages(&session.source_path, 0, &mut messages, &[], range_start_ms, true)?;
-    let main_elapsed = t0.elapsed().as_secs_f64() * 1000.0;
+    // 主文件解析与 subagent I/O+parse 并行
+    // 两者无数据依赖：main 用全局 rayon 并行 JSON 解析，sub 用 SUB_POOL（独立线程池）
+    // 并行后 wall time = max(main, sub) + merge，而非 main + sub + merge
+    let (mut messages, fbo, sub_result) = std::thread::scope(|s| -> Result<_> {
+        // 子线程: subagent I/O + parse（与 main 并行，不占全局 rayon 池）
+        let sub_handle = s.spawn(|| {
+            parse_subagent_messages_parallel(&session.source_path, range_start_ms)
+        });
 
-    let t_sub = std::time::Instant::now();
-    let (subagent_files, sub_results) = parse_subagent_messages_parallel(&session.source_path, range_start_ms)?;
-    let sub_elapsed = t_sub.elapsed().as_secs_f64() * 1000.0;
+        // 主线程: main 文件解析（使用全局 rayon 并行 JSON 解析）
+        let mut messages: MsgMap = HashMap::new();
+        let fbo = parse_file_into_messages(
+            &session.source_path, 0, &mut messages, &[], range_start_ms, true,
+        )?;
+
+        // join subagent 结果
+        let sub_result = sub_handle
+            .join()
+            .expect("subagent thread panicked")?;
+
+        Ok((messages, fbo, sub_result))
+    })?;
+
+    let parallel_elapsed = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let (subagent_files, sub_results) = sub_result;
 
     let t2 = std::time::Instant::now();
     for sub_msgs in sub_results {
@@ -512,9 +530,9 @@ pub(crate) fn extract_usage(
 
     if file_size > 500 * 1024 * 1024 {
         let wall = t0.elapsed().as_secs_f64() * 1000.0;
-        perf_log!("[PERF]     {} wall={:.0}ms(main={:.0}ms,sub={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
+        perf_log!("[PERF]     {} wall={:.0}ms(parallel={:.0}ms) merge={:.0}ms summarize={:.0}ms size={:.1}MB",
             short_file_tag(&session.source_path),
-            wall, main_elapsed, sub_elapsed,
+            wall, parallel_elapsed,
             (t3-t2).as_secs_f64()*1000.0, (std::time::Instant::now()-t3).as_secs_f64()*1000.0,
             file_size as f64 / 1e6);
     }
@@ -1041,6 +1059,7 @@ fn parse_subagent_messages_parallel(
 
     // Phase 1: 顺序 I/O 预读
     // 小文件顺序读比多线程随机读快：OS 可预取，无 inode 锁竞争，无线程争抢
+    // 注意：不能改为并行读，实测并行 I/O 与 main mmap 页错误竞争，反而慢 2-3x
     let t_io = std::time::Instant::now();
     let file_data: Vec<Vec<u8>> = files
         .into_iter()
